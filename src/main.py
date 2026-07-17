@@ -9,8 +9,7 @@ from pathlib import Path
 from constants import MOTOR_TO_ID, NEUTRAL_POSE, KP_DEFAULT
 from robot_controller import RobotController
 from scheduler import Scheduler
-from input.input_source import InputSource
-from input.keyboard_input import KeyboardInputSource
+from input.actions import build_input_source
 from moves.rotate_head import RotateHeadMove
 from moves.squat import SquatMove
 from moves.walk import WalkMove
@@ -29,29 +28,6 @@ def _another_session_running() -> bool:
     except (ValueError, OSError):
         return False
     return True
-
-# Which moves can be toggled from the gamepad / keyboard.
-MOVE_KEYS = {"h": "head", "s": "squat", "v": "walk"}
-GAMEPAD_BUTTON_MOVES = {"A": "walk"}
-
-
-def build_input_source() -> InputSource:
-    """Use the gamepad when one is connected, otherwise fall back to the keyboard.
-
-    Override with MICROBAN_INPUT=keyboard|gamepad.
-    """
-    requested = os.environ.get("MICROBAN_INPUT", "auto").lower()
-
-    if requested in ("auto", "gamepad"):
-        from input.gamepad_input import GamepadInputSource, find_gamepad_path
-
-        if find_gamepad_path() is not None:
-            return GamepadInputSource(button_moves=GAMEPAD_BUTTON_MOVES)
-        if requested == "gamepad":
-            raise RuntimeError("MICROBAN_INPUT=gamepad but no gamepad was found.")
-        print("No gamepad detected; using keyboard input.")
-
-    return KeyboardInputSource(move_keys=MOVE_KEYS)
 
 
 def ramp_to_neutral(controller: RobotController, duration_s: float = 2.0) -> None:

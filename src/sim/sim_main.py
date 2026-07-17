@@ -11,7 +11,8 @@ Usage:
 import argparse
 
 from scheduler import Scheduler
-from sim.mujoco_input import MuJoCoInputSource
+from input.actions import build_input_source
+from sim.debug_keys import SimDebugKeys
 from sim.mujoco_controller import MuJoCoController
 from moves.rotate_head import RotateHeadMove
 from moves.squat import SquatMove
@@ -29,11 +30,14 @@ def main() -> None:
     parser.add_argument("--trunk-com-offset", type=float, nargs=3, default=[0.0, 0.0, 0.0], metavar=("X", "Y", "Z"), help="CoM offset on trunk body in meters (body frame)")
     args = parser.parse_args()
 
-    input_source = MuJoCoInputSource(move_keys={"h": "head", "s": "squat", "v": "walk"})
+    # Exactly what main.py does on the robot: gamepad when connected, keyboard otherwise.
+    input_source = build_input_source()
+    debug_keys = SimDebugKeys()
+
     controller = MuJoCoController(
         mjcf_path="src/model/mjcf/scene.xml",
-        key_callback=input_source.key_callback,
-        reset_source=input_source,
+        key_callback=debug_keys.key_callback,
+        reset_source=debug_keys,
         delay_act_steps=args.delay_act,
         delay_pos_ticks=args.delay_pos,
         delay_vel_ticks=args.delay_vel,
@@ -41,7 +45,8 @@ def main() -> None:
         delay_quat_ticks=args.delay_quat,
         trunk_com_offset=tuple(args.trunk_com_offset),
     )
-    input_source.set_viewer_opt(controller.viewer_opt)
+    for line in debug_keys.help_lines():
+        print(line)
 
     scheduler = Scheduler(
         frequency_hz=args.hz,

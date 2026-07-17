@@ -11,7 +11,7 @@ import mujoco
 import mujoco.viewer
 
 if TYPE_CHECKING:
-    from sim.mujoco_input import MuJoCoInputSource
+    from sim.debug_keys import SimDebugKeys
 
 from bam.model import load_model as bam_load_model
 from bam.mujoco import MujocoController as BamController
@@ -43,7 +43,7 @@ class MuJoCoController:
         mjcf_path: str,
         key_callback: Callable[[int, int, int, int], None] | None = None,
         stop_flag_path: str = "/tmp/microban_scheduler.stop",
-        reset_source: "MuJoCoInputSource | None" = None,
+        reset_source: "SimDebugKeys | None" = None,
         # Actuation delay (command → motor), in simulator steps (default timestep: 0.005 s)
         delay_act_steps: int = 0,
         # Sensor delays (motor/IMU → observation), in scheduler ticks (default: 0.02 s)
@@ -132,10 +132,6 @@ class MuJoCoController:
         # Sensor indices for IMU readout
         self._sensor_orientation = mujoco.mj_name2id(self._model, mujoco.mjtObj.mjOBJ_SENSOR, "orientation")
         self._sensor_gyro = mujoco.mj_name2id(self._model, mujoco.mjtObj.mjOBJ_SENSOR, "angular-velocity")
-
-    @property
-    def viewer_opt(self) -> mujoco.MjvOption:
-        return self._viewer.opt
 
     def set_kp(self, kp: float) -> None:
         self._bam.model.actuator.kp = kp

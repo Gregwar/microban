@@ -7,37 +7,49 @@ import select
 import termios
 import tty
 import threading
-from pathlib import Path
 
-from input.input_source import InputSource, UserInput
-
-VELOCITY_STEP = 0.1
-VELOCITY_MAX = 1.0
+from input.actions import (
+    KEY_DOWN,
+    KEY_LEFT,
+    KEY_RIGHT,
+    KEY_STOP,
+    KEY_UP,
+    STOP_FLAG_PATH,
+    InputActions,
+    handle_key,
+    help_lines,
+)
 
 _ESCAPE = "\x1b"
-_ARROW_UP = "\x1b[A"
-_ARROW_DOWN = "\x1b[B"
-_ARROW_RIGHT = "\x1b[C"
-_ARROW_LEFT = "\x1b[D"
+
+# Raw terminal input → the normalized key names the shared bindings use.
+_SEQUENCE_TO_KEY = {
+    "\x1b[A": KEY_UP,
+    "\x1b[B": KEY_DOWN,
+    "\x1b[C": KEY_RIGHT,
+    "\x1b[D": KEY_LEFT,
+    "\x03": KEY_STOP,  # Ctrl+C
+}
 
 
-class KeyboardInputSource(InputSource):
+class KeyboardInputSource(InputActions):
     """Read keyboard input from a raw terminal in a background daemon thread.
 
+    Transport only — which key does what lives in input.actions, shared with the
+    simulation's viewer keyboard.
+
     Args:
-        move_keys: mapping from key character to move name, e.g. {"h": "head", "w": "walk"}.
+        move_keys: mapping from key character to move name, e.g. {"h": "head"}.
         stop_flag_path: path to the stop flag file polled by the scheduler.
     """
 
     def __init__(
         self,
         move_keys: dict[str, str],
-        stop_flag_path: str = "/tmp/microban_scheduler.stop",
+        stop_flag_path: str = STOP_FLAG_PATH,
     ) -> None:
+        super().__init__(stop_flag_path=stop_flag_path)
         self._move_keys = move_keys
-        self._stop_flag_path = Path(stop_flag_path)
-        self._state = UserInput()
-        self._lock = threading.Lock()
         self._thread: threading.Thread | None = None
         self._running = False
         self._old_settings: list | None = None
@@ -51,14 +63,6 @@ class KeyboardInputSource(InputSource):
     def stop(self) -> None:
         self._running = False
         self._restore_terminal()
-
-    def read(self) -> UserInput:
-        with self._lock:
-            return UserInput(
-                active_moves=set(self._state.active_moves),
-                velocity=dict(self._state.velocity),
-                show_imu=self._state.show_imu,
-            )
 
     # ------------------------------------------------------------------
     # Internal
@@ -74,7 +78,7 @@ class KeyboardInputSource(InputSource):
                     continue
                 key = self._read_key(fd)
                 if key:
-                    self._handle_key(key)
+                    handle_key(self, _SEQUENCE_TO_KEY.get(key, key), self._move_keys)
         finally:
             self._restore_terminal()
 
@@ -87,43 +91,6 @@ class KeyboardInputSource(InputSource):
                 return ch + rest
         return ch
 
-    def _handle_key(self, key: str) -> None:
-        if key in self._move_keys:
-            move_name = self._move_keys[key]
-            with self._lock:
-                if move_name in self._state.active_moves:
-                    self._state.active_moves.discard(move_name)
-                    print(f"Move '{move_name}' disabled", end="\r\n", flush=True)
-                else:
-                    self._state.active_moves.add(move_name)
-                    print(f"Move '{move_name}' enabled", end="\r\n", flush=True)
-        elif key == "x":
-            with self._lock:
-                self._state.velocity = {"vx": 0.0, "vy": 0.0, "vtheta": 0.0}
-            print("Velocity reset to zero", end="\r\n", flush=True)
-        elif key in ("q", "\x03"):  # q or Ctrl+C
-            self._stop_flag_path.write_text("stop\n", encoding="ascii")
-            print("Stop requested", end="\r\n", flush=True)
-        elif key == "i":
-            with self._lock:
-                self._state.show_imu = not self._state.show_imu
-            status = "enabled" if self._state.show_imu else "disabled"
-            print(f"IMU display {status}", end="\r\n", flush=True)
-        elif key == _ARROW_UP:
-            self._adjust_velocity("vx", +VELOCITY_STEP)
-        elif key == _ARROW_DOWN:
-            self._adjust_velocity("vx", -VELOCITY_STEP)
-        elif key == _ARROW_RIGHT:
-            self._adjust_velocity("vtheta", -VELOCITY_STEP)
-        elif key == _ARROW_LEFT:
-            self._adjust_velocity("vtheta", +VELOCITY_STEP)
-
-    def _adjust_velocity(self, axis: str, delta: float) -> None:
-        with self._lock:
-            v = self._state.velocity
-            v[axis] = max(-VELOCITY_MAX, min(VELOCITY_MAX, v[axis] + delta))
-        print(f"{axis}={self._state.velocity[axis]:.1f}", end="\r\n", flush=True)
-
     def _restore_terminal(self) -> None:
         if self._old_settings is not None:
             try:
@@ -133,13 +100,5 @@ class KeyboardInputSource(InputSource):
             self._old_settings = None
 
     def _print_help(self) -> None:
-        lines = [
-            "Keyboard controls:",
-            *(f"  [{key}]      toggle move '{name}'" for key, name in self._move_keys.items()),
-            "  [i]      toggle IMU/gyro display",
-            "  [arrows] vx (up/down), vtheta (left/right)",
-            "  [x]      reset velocity to zero",
-            "  [q]      stop scheduler",
-        ]
-        for line in lines:
-            print(line, end="\r\n", flush=True)
+        for line in ["Keyboard controls:", *help_lines(self._move_keys)]:
+            self.notify(line)

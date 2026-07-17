@@ -6,9 +6,8 @@ import glob
 import struct
 import select
 import threading
-from pathlib import Path
 
-from input.input_source import InputSource, UserInput
+from input.actions import STOP_FLAG_PATH, InputActions
 
 # Stick fraction below which the axis is treated as centered (drift rejection).
 DEADZONE = 0.12
@@ -54,12 +53,13 @@ def find_gamepad_path() -> str | None:
     return paths[0] if paths else None
 
 
-class GamepadInputSource(InputSource):
+class GamepadInputSource(InputActions):
     """Read an Xbox (or compatible) gamepad via the Linux joystick API in a daemon thread.
 
-    Left stick drives (vx, vy), right stick drives vtheta. Buttons toggle moves.
-    Designed as a drop-in replacement for KeyboardInputSource. Zero dependencies:
-    reads raw 8-byte events from /dev/input/js* with struct.
+    Left stick drives (vx, vy), right stick drives vtheta. Buttons toggle moves. Transport
+    only — the actions themselves come from input.actions, so a button and its keyboard
+    equivalent do exactly the same thing. Zero dependencies: reads raw 8-byte events from
+    /dev/input/js* with struct.
 
     Args:
         button_moves: mapping from Xbox button name to move name, e.g. {"A": "walk"}.
@@ -75,10 +75,10 @@ class GamepadInputSource(InputSource):
         stop_button: str = "B",
         imu_button: str | None = "BACK",
         device_path: str | None = None,
-        stop_flag_path: str = "/tmp/microban_scheduler.stop",
+        stop_flag_path: str = STOP_FLAG_PATH,
     ) -> None:
+        super().__init__(stop_flag_path=stop_flag_path)
         self._button_moves = button_moves if button_moves is not None else {"A": "walk"}
-        self._stop_flag_path = Path(stop_flag_path)
         self._device_path = device_path
 
         # Resolve button names to joystick button numbers once, up front.
@@ -87,8 +87,6 @@ class GamepadInputSource(InputSource):
         self._imu_number = self._number(imu_button) if imu_button else None
         self._name_by_number = {v: k for k, v in XBOX_BUTTONS.items()}
 
-        self._state = UserInput()
-        self._lock = threading.Lock()
         self._thread: threading.Thread | None = None
         self._running = False
         self._fd: int | None = None
@@ -109,7 +107,7 @@ class GamepadInputSource(InputSource):
                 "No gamepad found. Pair the controller (bluetoothctl) and check /dev/input/js*."
             )
         self._fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK)
-        print(f"Gamepad detected: {path}", end="\r\n", flush=True)
+        self.notify(f"Gamepad detected: {path}")
         self._running = True
         self._thread = threading.Thread(target=self._read_loop, daemon=True)
         self._thread.start()
@@ -123,14 +121,6 @@ class GamepadInputSource(InputSource):
             except OSError:
                 pass
             self._fd = None
-
-    def read(self) -> UserInput:
-        with self._lock:
-            return UserInput(
-                active_moves=set(self._state.active_moves),
-                velocity=dict(self._state.velocity),
-                show_imu=self._state.show_imu,
-            )
 
     # ------------------------------------------------------------------
     # Internal
@@ -164,9 +154,8 @@ class GamepadInputSource(InputSource):
     def _on_disconnect(self) -> None:
         # Stop commanding motion on the last (now stale) stick values, otherwise the
         # robot would keep moving on the velocity it had when the controller dropped.
-        with self._lock:
-            self._state.velocity = {"vx": 0.0, "vy": 0.0, "vtheta": 0.0}
-        print("Gamepad disconnected (velocity zeroed)", end="\r\n", flush=True)
+        self.zero_velocity()
+        self.notify("Gamepad disconnected (velocity zeroed)")
 
     def _normalize(self, value: int) -> float:
         norm = max(-1.0, min(1.0, value / _AXIS_FULL_SCALE))
@@ -174,35 +163,19 @@ class GamepadInputSource(InputSource):
 
     def _handle_axis(self, number: int, value: int) -> None:
         if number == _AXIS_LY:
-            self._set_velocity("vx", VX_SIGN * self._normalize(value))
+            self.set_velocity("vx", VX_SIGN * self._normalize(value))
         elif number == _AXIS_LX:
-            self._set_velocity("vy", VY_SIGN * self._normalize(value))
+            self.set_velocity("vy", VY_SIGN * self._normalize(value))
         elif number == _AXIS_RX:
-            self._set_velocity("vtheta", VTHETA_SIGN * self._normalize(value))
-
-    def _set_velocity(self, axis: str, norm: float) -> None:
-        # Emit a normalized command in [-1, 1]; scale_velocity() applies the physical limits.
-        with self._lock:
-            self._state.velocity[axis] = max(-1.0, min(1.0, norm))
+            self.set_velocity("vtheta", VTHETA_SIGN * self._normalize(value))
 
     def _handle_button(self, number: int) -> None:
         if number in self._move_numbers:
-            move_name = self._move_numbers[number]
-            with self._lock:
-                if move_name in self._state.active_moves:
-                    self._state.active_moves.discard(move_name)
-                    print(f"Move '{move_name}' disabled", end="\r\n", flush=True)
-                else:
-                    self._state.active_moves.add(move_name)
-                    print(f"Move '{move_name}' enabled", end="\r\n", flush=True)
+            self.toggle_move(self._move_numbers[number])
         elif number == self._stop_number:
-            self._stop_flag_path.write_text("stop\n", encoding="ascii")
-            print("Stop requested", end="\r\n", flush=True)
+            self.request_stop()
         elif self._imu_number is not None and number == self._imu_number:
-            with self._lock:
-                self._state.show_imu = not self._state.show_imu
-            status = "enabled" if self._state.show_imu else "disabled"
-            print(f"IMU display {status}", end="\r\n", flush=True)
+            self.toggle_imu()
 
     def _print_help(self) -> None:
         def btn(number: int) -> str:
@@ -218,4 +191,4 @@ class GamepadInputSource(InputSource):
             lines.append(f"  [{btn(self._imu_number)}]  toggle IMU/gyro display")
         lines.append(f"  [{btn(self._stop_number)}]  stop scheduler")
         for line in lines:
-            print(line, end="\r\n", flush=True)
+            self.notify(line)
