@@ -79,7 +79,7 @@ KP_GAIN_PRM: float = 0.0022  # Nm/rad per register unit (for Xl330)
 # BAM motor model (bam package, XL330 m6)
 BAM_VIN: float = 7.5
 BAM_VIN_MIN: float = 6.0
-BAM_VOLTAGE_DROP_GAIN: float = 0.2
+BAM_VOLTAGE_DROP_RESISTANCE: float = 0.080
 BAM_MAX_CURRENT: float = 1.75 # XL330 firmware current limit [A]: clips motor torque to ±BAM_MAX_CURRENT * kt
 
 # Overcurrent safety: emergency torque-off when the summed |present_current| of all

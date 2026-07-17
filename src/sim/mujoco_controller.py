@@ -16,7 +16,7 @@ if TYPE_CHECKING:
 from bam.model import load_model as bam_load_model
 from bam.mujoco import MujocoController as BamController
 
-from constants import MOTOR_TO_ID, ID_TO_MOTOR, NEUTRAL_POSE, KP_DEFAULT, BAM_VIN, BAM_VOLTAGE_DROP_GAIN, BAM_VIN_MIN, BAM_MAX_CURRENT
+from constants import MOTOR_TO_ID, ID_TO_MOTOR, NEUTRAL_POSE, KP_DEFAULT, BAM_VIN, BAM_VOLTAGE_DROP_RESISTANCE, BAM_VIN_MIN, BAM_MAX_CURRENT
 
 
 class _DelayBuffer:
@@ -121,11 +121,9 @@ class MuJoCoController:
             list(MOTOR_TO_ID.keys()),
             self._model,
             self._data,
-            vin_drop_gain=BAM_VOLTAGE_DROP_GAIN,
-            vin_min=BAM_VIN_MIN,
-            max_current=BAM_MAX_CURRENT,
+            vin_drop_resistance=BAM_VOLTAGE_DROP_RESISTANCE,
+            vin_min=BAM_VIN_MIN
         )
-        self._bam.reset(self._data.qpos)
 
         self._viewer = mujoco.viewer.launch_passive(
             self._model, self._data, key_callback=key_callback
@@ -265,7 +263,6 @@ class MuJoCoController:
             if name in self._name_to_qpos_idx:
                 self._data.qpos[self._name_to_qpos_idx[name]] = angle
         mujoco.mj_forward(self._model, self._data)
-        self._bam.reset(self._data.qpos)
         for mid in MOTOR_TO_ID.values():
             neutral = self._data.qpos[self._name_to_qpos_idx[ID_TO_MOTOR[mid]]]
             self._delay_act[mid].fill(neutral)
