@@ -17,6 +17,10 @@ sim = [
     "better-actuator-models",
     "mujoco>=3.8.1",
 ]
+# Local-only tooling for the scripts in src/debug (never deployed: `sync` excludes them).
+debug = [
+    "matplotlib",
+]
 
 [tool.uv]
 override-dependencies = [
