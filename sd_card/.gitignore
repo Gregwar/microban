@@ -1,0 +1,4 @@
+boot.img.*
+root.img.*
+partition-table.sfdisk
+sdcard.fsa
