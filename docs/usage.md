@@ -67,6 +67,11 @@ up as `null` rather than shifting the series.
 Quitting with `q` while a session is running still writes the file. Logs stay on the robot
 until you pull them over with `make get-logs`, which copies them into your local `logs/`.
 
+To inspect one, `uv run --group debug src/debug/plot_log.py` plots the newest log (pass a
+path for a specific one): goal against read position on top, velocity below, with a checkbox
+per joint to choose what is drawn. The `debug` group carries matplotlib for the scripts in
+`src/debug/`; it is not installed on the robot.
+
 > While the name prompt is open, keys are captured by the prompt — `Ctrl+C` still stops
 > the control loop if you need it.
 
