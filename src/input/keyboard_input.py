@@ -82,6 +82,45 @@ class KeyboardInputSource(InputActions):
         finally:
             self._restore_terminal()
 
+    def prompt_log_name(self) -> str | None:
+        """Read an optional log name from the raw terminal. "" if blank, None if cancelled.
+
+        Called from the input thread, so no other binding is dispatched while the user
+        types — Ctrl+C therefore stays wired to the stop request, keeping the robot
+        stoppable mid-prompt, and Esc cancels. The terminal is already in raw mode, so
+        the line is echoed and edited by hand here.
+        """
+        fd = sys.stdin.fileno()
+        buffer = ""
+        self.notify("Log name (optional) — Enter to confirm, Esc to cancel:")
+        print("> ", end="", flush=True)
+
+        while self._running:
+            if not select.select([sys.stdin], [], [], 0.1)[0]:
+                continue
+
+            key = self._read_key(fd)
+            if key in ("\r", "\n"):
+                print("", end="\r\n", flush=True)
+                return buffer
+            if key == _ESCAPE:
+                print("", end="\r\n", flush=True)
+                return None
+            if key == "\x03":  # Ctrl+C — keep the emergency stop reachable while typing
+                print("", end="\r\n", flush=True)
+                self.request_stop()
+                return None
+            if key in ("\x7f", "\x08"):
+                buffer = buffer[:-1]
+            elif len(key) == 1 and key.isprintable():
+                buffer += key
+            else:
+                continue  # arrows and other escape sequences have no meaning here
+
+            print(f"\r\x1b[K> {buffer}", end="", flush=True)
+
+        return None
+
     def _read_key(self, fd: int) -> str:
         ch = os.read(fd, 1).decode("utf-8", errors="replace")
         if ch == _ESCAPE:

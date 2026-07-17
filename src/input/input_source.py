@@ -14,6 +14,10 @@ class UserInput:
     active_moves: set[str] = field(default_factory=set)
     velocity: dict[str, float] = field(default_factory=lambda: {"vx": 0.0, "vy": 0.0, "vtheta": 0.0})
     show_imu: bool = False
+    # True while the scheduler should record a log session; log_name is the optional
+    # filename suffix chosen when logging was switched on.
+    logging: bool = False
+    log_name: str = ""
 
 
 def scale_velocity(velocity: dict[str, float]) -> dict[str, float]:

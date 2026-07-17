@@ -26,6 +26,7 @@ from imu_reader import imu_quat_to_body
 from observer import Observer, Observation
 from input.input_source import InputSource, UserInput, scale_velocity
 from moves.move import MotorCommand, Move, MoveState
+from robot_logger import RobotLogger
 from moves.rotate_head import RotateHeadMove
 from moves.squat import SquatMove
 from moves.walk import WalkMove
@@ -47,6 +48,7 @@ class Scheduler:
         self.input_source = input_source
 
         self.observer = Observer(self.controller)
+        self.logger = RobotLogger()
 
         # All moves are registered here. They only run when activated via user_input.active_moves.
         self.registered_moves: dict[str, Move] = moves if moves is not None else {
@@ -135,6 +137,8 @@ class Scheduler:
                 self._cmd_history.append(dict(command.target_angles))
                 self._send_to_motors(command)
 
+                self._update_logging(obs, command)
+
                 # IMU / gyro terminal display
                 if obs.user_input.show_imu and (start_time - self._last_imu_print_s) >= 0.5:
                     acc = obs.robot_state.acc
@@ -175,6 +179,27 @@ class Scheduler:
         finally:
             self._cleanup()
 
+    def _update_logging(self, obs: Observation, command: MotorCommand) -> None:
+        """Start, feed or stop the log session to follow the [l] toggle."""
+        if obs.user_input.logging:
+            if not self.logger.active:
+                path = self.logger.start(obs.user_input.log_name)
+                print(f"Logging to {path}", end="\r\n", flush=True)
+            self.logger.record(obs.robot_state, command.target_angles, obs.user_input.velocity)
+        elif self.logger.active:
+            self._stop_logging()
+
+    def _stop_logging(self) -> None:
+        """Close the log session. Never raises: losing a log must not take down the
+        control loop, nor block the torque-off in _cleanup()."""
+        try:
+            path = self.logger.stop()
+        except Exception as exc:
+            print(f"Warning: could not write log: {exc}", end="\r\n", flush=True)
+            return
+        if path is not None:
+            print(f"Log written to {path}", end="\r\n", flush=True)
+
     def _cleanup(self) -> None:
         """Disable torque, stop input source, and clear stop artifacts."""
         if self._cleanup_done:
@@ -192,6 +217,11 @@ class Scheduler:
         motor_ids = list(MOTOR_TO_ID.values())
         self.controller.sync_write_torque_enable(motor_ids, [False] * len(motor_ids))
         print("Torque disabled on all motors", end="\r\n", flush=True)
+
+        # Flush an in-progress session last, so quitting mid-log still yields a file but a
+        # logging failure can never keep torque enabled on the way out.
+        if self.logger.active:
+            self._stop_logging()
 
         if self.stop_flag_path.exists():
             self.stop_flag_path.unlink()

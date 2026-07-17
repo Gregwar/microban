@@ -1,4 +1,4 @@
-.PHONY: sync setup run stop shutdown voltage imu sim viewer gamepad-headless-enable gamepad-headless-disable
+.PHONY: sync setup run stop shutdown voltage imu sim viewer get-logs gamepad-headless-enable gamepad-headless-disable
 
 HOST ?= microban
 ID ?=
@@ -30,6 +30,11 @@ run: sync
 
 stop:
 	ssh -tt $(HOST) "bash -l -c 'cd microban && PYTHONPATH=src .venv/bin/python src/stop.py'"
+
+# Fetch the JSON logs recorded with [l] during a session. Kept out of `sync` (which
+# excludes logs/), so deploying never touches what is on the robot.
+get-logs:
+	rsync -avz $(HOST):microban/logs/ ./logs/
 
 voltage: sync
 	ssh $(HOST) "bash -l -c 'cd microban && PYTHONPATH=src .venv/bin/python src/voltage.py $(ID)'"

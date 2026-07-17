@@ -29,6 +29,7 @@ by default; add `HOST=microban-ext` to operate over the secondary network (see t
 | `make voltage ID=<id>` | Read the voltage of motor `<id>`. |
 | `make sim` | Run the MuJoCo simulation locally (no robot needed). |
 | `make viewer` | Open the MuJoCo viewer locally (no robot needed). |
+| `make get-logs` | Copy the JSON logs recorded with `l` from the robot into `./logs/`. |
 
 ## Running the robot
 
@@ -48,7 +49,26 @@ by default; add `HOST=microban-ext` to operate over the secondary network (see t
 | arrows | `vx` (up/down), `vtheta` (left/right) |
 | `x` | reset velocity to zero |
 | `i` | toggle the IMU/gyro display |
+| `l` | start/stop logging (see below) |
 | `q` | stop the control loop |
+
+## Logging a session
+
+Press `l` to start recording, and `l` again to stop. On start you are prompted for an
+optional name — press Enter to skip it, or `Esc` to cancel. Each session is written as one
+JSON file under `logs/`, named after its start date plus that name:
+`logs/2026-07-17_14-32-05_walk-test.json`.
+
+Every tick records the target position, the read position and velocity of each motor, the
+IMU gyro and quaternion, and the `vx`/`vy`/`vtheta` command fed to the walk policy. Channels
+are keyed by motor name and are all the same length as `time`, so a dropped IMU read shows
+up as `null` rather than shifting the series.
+
+Quitting with `q` while a session is running still writes the file. Logs stay on the robot
+until you pull them over with `make get-logs`, which copies them into your local `logs/`.
+
+> While the name prompt is open, keys are captured by the prompt — `Ctrl+C` still stops
+> the control loop if you need it.
 
 ## Controlling with a gamepad
 

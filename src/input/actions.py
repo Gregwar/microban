@@ -36,6 +36,7 @@ KEY_RIGHT = "right"
 KEY_RESET_VELOCITY = "x"
 KEY_IMU = "i"
 KEY_STOP = "q"
+KEY_LOG = "l"
 
 
 class InputActions(InputSource):
@@ -58,6 +59,8 @@ class InputActions(InputSource):
                 active_moves=set(self._state.active_moves),
                 velocity=dict(self._state.velocity),
                 show_imu=self._state.show_imu,
+                logging=self._state.logging,
+                log_name=self._state.log_name,
             )
 
     def notify(self, message: str) -> None:
@@ -110,6 +113,40 @@ class InputActions(InputSource):
         self._stop_flag_path.write_text("stop\n", encoding="ascii")
         self.notify("Stop requested")
 
+    def prompt_log_name(self) -> str | None:
+        """Ask for an optional log name suffix. Return "" for none, None to cancel.
+
+        Hook: only a source owning a terminal can actually prompt (the keyboard does).
+        The default answers "no name", so a gamepad would log under a plain date stamp.
+        """
+        return ""
+
+    def toggle_logging(self) -> None:
+        """Start a log session (asking for an optional name first) or stop the running one.
+
+        The scheduler owns the file; it watches UserInput.logging and starts/stops
+        RobotLogger on the transition.
+        """
+        with self._lock:
+            running = self._state.logging
+
+        if running:
+            with self._lock:
+                self._state.logging = False
+            self.notify("Logging stopped")
+            return
+
+        # Prompt outside the lock: it blocks on terminal input for as long as the user types.
+        name = self.prompt_log_name()
+        if name is None:
+            self.notify("Logging cancelled")
+            return
+
+        with self._lock:
+            self._state.log_name = name
+            self._state.logging = True
+        self.notify(f"Logging started{f' ({name})' if name else ''}")
+
 
 def handle_key(actions: InputActions, key: str, move_keys: dict[str, str]) -> bool:
     """Apply the shared binding for a normalized key name.
@@ -123,6 +160,8 @@ def handle_key(actions: InputActions, key: str, move_keys: dict[str, str]) -> bo
         actions.reset_velocity()
     elif key == KEY_IMU:
         actions.toggle_imu()
+    elif key == KEY_LOG:
+        actions.toggle_logging()
     elif key == KEY_STOP:
         actions.request_stop()
     elif key == KEY_UP:
@@ -144,6 +183,7 @@ def help_lines(move_keys: dict[str, str]) -> list[str]:
     return [
         *(f"  [{key}]       toggle move '{name}'" for key, name in move_keys.items()),
         f"  [{KEY_IMU}]       toggle IMU/gyro display",
+        f"  [{KEY_LOG}]       start/stop logging (asks for an optional name)",
         "  [arrows]  vx (up/down), vtheta (left/right)",
         f"  [{KEY_RESET_VELOCITY}]       reset velocity to zero",
         f"  [{KEY_STOP}]       stop scheduler",
