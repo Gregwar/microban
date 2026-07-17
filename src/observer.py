@@ -59,15 +59,25 @@ class Observer:
 
         motor_names = list(MOTOR_TO_ID.keys())
         motor_ids = list(MOTOR_TO_ID.values())
-        angles = self.controller.sync_read_present_position(motor_ids)
-        state.motor_positions = dict(zip(motor_names, angles))
 
-        velocities = self.controller.sync_read_present_velocity(motor_ids)
-        state.motor_velocities = dict(zip(motor_names, velocities))
+        # One bus transaction instead of two (three with current) where the controller
+        # supports it and has verified it against its own per-register reads.
+        if getattr(self.controller, "fused_read_enabled", False):
+            angles, velocities, currents = self.controller.sync_read_state(motor_ids)
+            state.motor_positions = dict(zip(motor_names, angles))
+            state.motor_velocities = dict(zip(motor_names, velocities))
+            if self.observe_current:
+                state.motor_currents = dict(zip(motor_names, currents))
+        else:
+            angles = self.controller.sync_read_present_position(motor_ids)
+            state.motor_positions = dict(zip(motor_names, angles))
 
-        if self.observe_current:
-            currents = self.controller.sync_read_present_current(motor_ids)
-            state.motor_currents = dict(zip(motor_names, currents))
+            velocities = self.controller.sync_read_present_velocity(motor_ids)
+            state.motor_velocities = dict(zip(motor_names, velocities))
+
+            if self.observe_current:
+                currents = self.controller.sync_read_present_current(motor_ids)
+                state.motor_currents = dict(zip(motor_names, currents))
 
         if self.observe_voltage:
             voltages = self.controller.sync_read_present_input_voltage(motor_ids)

@@ -27,6 +27,10 @@ from observer import Observer, Observation
 from input.input_source import InputSource, UserInput, scale_velocity
 from moves.move import MotorCommand, Move, MoveState
 from robot_logger import RobotLogger
+
+# How often the [p] timing report is printed. Averaging over a window beats printing every
+# tick: at 50 Hz that would flood the terminal, and the I/O would distort what it measures.
+TIMING_PRINT_INTERVAL_S = 0.5
 from moves.rotate_head import RotateHeadMove
 from moves.squat import SquatMove
 from moves.walk import WalkMove
@@ -64,6 +68,11 @@ class Scheduler:
         self._serial_errors = 0
         self._last_imu_print_s: float = 0.0
         self._last_imu_stale_warn_s: float = 0.0
+        self._timings: dict[str, list[float]] = {}
+        self._timing_overruns: int = 0
+        # Anchored to now rather than 0.0, so a source that starts with timings already on
+        # still reports its first full window instead of a single-tick sample.
+        self._last_timing_print_s: float = time.perf_counter()
         self._overcurrent_ticks = 0
         # History of sent target_angles, to align the current proxy with the delayed feedback:
         # the oldest entry is the command issued OVERCURRENT_PROXY_DELAY_TICKS ticks ago.
@@ -96,6 +105,7 @@ class Scheduler:
                     print(f"Warning: serial read error (attempt {self._serial_errors}/3): {e}", end="\r\n", flush=True)
                     continue
                 self._serial_errors = 0
+                read_s = time.perf_counter() - start_time
 
                 robot_state.time_s = start_time - self.loop_start_time
                 user_input = self.input_source.read() if self.input_source else UserInput()
@@ -111,6 +121,7 @@ class Scheduler:
                         self._last_imu_stale_warn_s = start_time
 
                 # Update move states and dispatch one call per move per tick
+                moves_start = time.perf_counter()
                 command = MotorCommand()
                 for name, move in self.registered_moves.items():
                     in_active = name in obs.user_input.active_moves
@@ -128,6 +139,7 @@ class Scheduler:
                         move.step(obs, command)
                     elif move.state == MoveState.STOPPING:
                         move.on_stop(obs, command)
+                moves_s = time.perf_counter() - moves_start
 
                 # Overcurrent safety: estimate the current from the command that was actually
                 # active when the (delayed) position/velocity feedback was sampled — the oldest
@@ -140,9 +152,24 @@ class Scheduler:
 
                 # Send command to motors
                 self._cmd_history.append(dict(command.target_angles))
+                send_start = time.perf_counter()
                 self._send_to_motors(command)
+                send_s = time.perf_counter() - send_start
 
                 self._update_logging(obs, command)
+
+                # Sampled before the displays below, so the report measures the control
+                # work rather than the cost of reporting it.
+                self._update_timings(
+                    obs.user_input.show_timings,
+                    start_time,
+                    {
+                        "read": read_s,
+                        "moves": moves_s,
+                        "send": send_s,
+                        "tick": time.perf_counter() - start_time,
+                    },
+                )
 
                 # IMU / gyro terminal display
                 if obs.user_input.show_imu and (start_time - self._last_imu_print_s) >= 0.5:
@@ -183,6 +210,49 @@ class Scheduler:
             print("Control loop interrupted by user", end="\r\n", flush=True)
         finally:
             self._cleanup()
+
+    def _update_timings(self, show: bool, now: float, phases: dict[str, float]) -> None:
+        """Accumulate per-tick phase durations and report them twice a second.
+
+        `read` is the observer (serial + IMU on the robot), `moves` the policy/IK work,
+        `send` the bus write (in simulation, the physics step and viewer sync), and `tick`
+        the three plus the loop's own overhead — everything before the sleep that keeps
+        the loop at its frequency.
+        """
+        if not show:
+            self._timings.clear()
+            self._timing_overruns = 0
+            # Keep the window anchored to now, so enabling [p] starts a fresh interval.
+            self._last_timing_print_s = now
+            return
+
+        for name, value in phases.items():
+            self._timings.setdefault(name, []).append(value)
+        if phases["tick"] > self.dt:
+            self._timing_overruns += 1
+
+        if (now - self._last_timing_print_s) < TIMING_PRINT_INTERVAL_S:
+            return
+
+        ticks = len(self._timings["tick"])
+        print("--------------------------------------------", end="\r\n", flush=True)
+        print(
+            f"Timings over {ticks} tick{'s' if ticks != 1 else ''} — budget {self.dt * 1000:.1f} ms/tick",
+            end="\r\n",
+            flush=True,
+        )
+        for name in ("read", "moves", "send", "tick"):
+            values = self._timings.get(name)
+            if not values:
+                continue
+            avg_ms = sum(values) / len(values) * 1000.0
+            max_ms = max(values) * 1000.0
+            over = f"  ({self._timing_overruns} over budget)" if name == "tick" else ""
+            print(f"  {name:<5} avg={avg_ms:6.2f}  max={max_ms:6.2f} ms{over}", end="\r\n", flush=True)
+
+        self._timings.clear()
+        self._timing_overruns = 0
+        self._last_timing_print_s = now
 
     def _update_logging(self, obs: Observation, command: MotorCommand) -> None:
         """Start, feed or stop the log session to follow the [l] toggle."""

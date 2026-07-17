@@ -52,6 +52,8 @@ class RobotLogger:
         self._t0: float = 0.0
         self._started_at: str = ""
         self._samples: dict = {}
+        self._policy_t0: float | None = None
+        self._policy_name: str | None = None
 
     @property
     def active(self) -> bool:
@@ -67,6 +69,8 @@ class RobotLogger:
         self._path = self._log_dir / f"{stem}.json"
         self._started_at = now.isoformat(timespec="seconds")
         self._t0 = time.perf_counter()
+        self._policy_t0 = None
+        self._policy_name = None
         self._samples = {
             "time": [],
             "target_position": {name: [] for name in MOTOR_TO_ID},
@@ -74,9 +78,26 @@ class RobotLogger:
             "velocity": {name: [] for name in MOTOR_TO_ID},
             "gyro": {axis: [] for axis in ("x", "y", "z")},
             "quat": {axis: [] for axis in ("w", "x", "y", "z")},
+            # Orientation in the trunk frame. The raw quat above is in the IMU sensor
+            # frame (IMU_MOUNT_QUAT is not identity), so it is this one — not `quat` —
+            # that yields the robot's roll/pitch.
+            "body_quat": {axis: [] for axis in ("w", "x", "y", "z")},
             "command": {axis: [] for axis in ("vx", "vy", "vtheta")},
         }
         return self._path
+
+    def mark_policy_start(self, move_name: str) -> None:
+        """Stamp when a policy went active, as seconds into this session.
+
+        Recorded once per session (the first policy to start wins), so that logs of the
+        same manoeuvre can be lined up on it even when the operator hit [l] at a
+        different moment in each run. A policy already running when logging starts is
+        not stamped — its real start time is outside the log.
+        """
+        if not self.active or self._policy_t0 is not None:
+            return
+        self._policy_t0 = round(time.perf_counter() - self._t0, 4)
+        self._policy_name = move_name
 
     def record(
         self,
@@ -106,6 +127,10 @@ class RobotLogger:
         for axis, value in zip(("w", "x", "y", "z"), quat):
             s["quat"][axis].append(_as_float(value))
 
+        body_quat = robot_state.body_quat or [None] * 4
+        for axis, value in zip(("w", "x", "y", "z"), body_quat):
+            s["body_quat"][axis].append(_as_float(value))
+
         for axis in ("vx", "vy", "vtheta"):
             s["command"][axis].append(_as_float(command_velocity.get(axis, 0.0)))
 
@@ -124,6 +149,9 @@ class RobotLogger:
                 "started_at": self._started_at,
                 "duration_s": round(time.perf_counter() - self._t0, 3),
                 "ticks": len(self._samples["time"]),
+                # Seconds into the log at which a policy went active, or null if none did.
+                "policy_t0": self._policy_t0,
+                "policy": self._policy_name,
             },
             **self._samples,
         }

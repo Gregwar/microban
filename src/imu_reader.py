@@ -8,6 +8,7 @@ import numpy as np
 
 from ahrs.common.orientation import acc2q
 from bmi088 import BMI088
+from bmi088.params import GyroBandwidth
 import bmi088.bmi088 as _bmi_module
 from constants import IMU_MOUNT_QUAT
 
@@ -66,7 +67,7 @@ class ThreadedIMUReader:
         if frequency_hz <= 0:
             raise ValueError("frequency_hz must be > 0")
 
-        self._imu = BMI088(i2c_bus=i2c_bus)
+        self._imu = BMI088(i2c_bus=i2c_bus, gyro_bandwidth=GyroBandwidth.BANDWIDTH_200)
         self._period_s = 1.0 / frequency_hz
         self._warn_interval_s = warn_interval_s
 

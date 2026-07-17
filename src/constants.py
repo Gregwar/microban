@@ -112,6 +112,11 @@ VTHETA_MAX_STATIONARY: float = 3.0
 VTHETA_MAX_MOVING: float = 1.5
 
 # IMU (BMI088) I2C bus number on the Raspberry Pi
+# Motor bus baud rate. Must match what the motors are actually set to (EEPROM): change it
+# here only after `make set-baud` has switched the motors over, or the bus goes silent.
+# MICROBAN_BAUD overrides it, for trying a rate without editing the code.
+MOTOR_BAUDRATE: int = 2_000_000
+
 IMU_I2C_BUS: int = 1
 
 # Rotation from trunk frame (body) to IMU sensor frame

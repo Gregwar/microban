@@ -37,6 +37,9 @@ KEY_RESET_VELOCITY = "x"
 KEY_IMU = "i"
 KEY_STOP = "q"
 KEY_LOG = "l"
+# [t] would read better, but the MuJoCo viewer already uses it for the torque display and
+# a key meaning two things across the two windows is worse than a less obvious letter.
+KEY_TIMINGS = "p"
 
 
 class InputActions(InputSource):
@@ -59,6 +62,7 @@ class InputActions(InputSource):
                 active_moves=set(self._state.active_moves),
                 velocity=dict(self._state.velocity),
                 show_imu=self._state.show_imu,
+                show_timings=self._state.show_timings,
                 logging=self._state.logging,
                 log_name=self._state.log_name,
             )
@@ -108,6 +112,13 @@ class InputActions(InputSource):
             show = self._state.show_imu
         self.notify(f"IMU display {'enabled' if show else 'disabled'}")
         return show
+
+    def toggle_timings(self) -> None:
+        """Toggle the scheduler's per-tick timing report."""
+        with self._lock:
+            self._state.show_timings = not self._state.show_timings
+            show = self._state.show_timings
+        self.notify(f"Timing display {'enabled' if show else 'disabled'}")
 
     def request_stop(self) -> None:
         self._stop_flag_path.write_text("stop\n", encoding="ascii")
@@ -162,6 +173,8 @@ def handle_key(actions: InputActions, key: str, move_keys: dict[str, str]) -> bo
         actions.toggle_imu()
     elif key == KEY_LOG:
         actions.toggle_logging()
+    elif key == KEY_TIMINGS:
+        actions.toggle_timings()
     elif key == KEY_STOP:
         actions.request_stop()
     elif key == KEY_UP:
@@ -184,6 +197,7 @@ def help_lines(move_keys: dict[str, str]) -> list[str]:
         *(f"  [{key}]       toggle move '{name}'" for key, name in move_keys.items()),
         f"  [{KEY_IMU}]       toggle IMU/gyro display",
         f"  [{KEY_LOG}]       start/stop logging (asks for an optional name)",
+        f"  [{KEY_TIMINGS}]       toggle scheduler timing display",
         "  [arrows]  vx (up/down), vtheta (left/right)",
         f"  [{KEY_RESET_VELOCITY}]       reset velocity to zero",
         f"  [{KEY_STOP}]       stop scheduler",

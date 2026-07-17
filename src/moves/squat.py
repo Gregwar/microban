@@ -32,7 +32,7 @@ class SquatMove(Move):
 
     def __init__(
         self,
-        frequency: float = 0.3,
+        frequency: float = 0.25,
         amplitude: float = 0.02,
         lerp_duration: float = 1.0,
     ) -> None:
