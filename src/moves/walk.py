@@ -21,6 +21,8 @@ AGENT_NAME = "walk.onnx"
 class WalkMove(Move):
     """Walk using a RL policy trained in simulation."""
 
+    is_policy = True
+
     def __init__(self, controller: ControllerProtocol | None = None) -> None:
         super().__init__()
         self._controller = controller

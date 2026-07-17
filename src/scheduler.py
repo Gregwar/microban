@@ -49,6 +49,9 @@ class Scheduler:
 
         self.observer = Observer(self.controller)
         self.logger = RobotLogger()
+        # Name of a policy that went active this tick, consumed by _update_logging (which
+        # runs later in the tick, once the logger has had a chance to start).
+        self._policy_started: str | None = None
 
         # All moves are registered here. They only run when activated via user_input.active_moves.
         self.registered_moves: dict[str, Move] = moves if moves is not None else {
@@ -114,6 +117,8 @@ class Scheduler:
 
                     if in_active and move.state == MoveState.INACTIVE:
                         move.state = MoveState.STARTING
+                        if move.is_policy:
+                            self._policy_started = name
                     elif not in_active and move.state in (MoveState.STARTING, MoveState.ACTIVE):
                         move.state = MoveState.STOPPING
 
@@ -186,8 +191,12 @@ class Scheduler:
                 path = self.logger.start(obs.user_input.log_name)
                 print(f"Logging to {path}", end="\r\n", flush=True)
             self.logger.record(obs.robot_state, command.target_angles, obs.user_input.velocity)
+            if self._policy_started is not None:
+                self.logger.mark_policy_start(self._policy_started)
         elif self.logger.active:
             self._stop_logging()
+
+        self._policy_started = None
 
     def _stop_logging(self) -> None:
         """Close the log session. Never raises: losing a log must not take down the

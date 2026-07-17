@@ -35,6 +35,8 @@ class SquatRlMove(Move):
     for every joint except the head — which this move therefore leaves at neutral.
     """
 
+    is_policy = True
+
     def __init__(self, controller: ControllerProtocol | None = None) -> None:
         super().__init__()
         self._controller = controller

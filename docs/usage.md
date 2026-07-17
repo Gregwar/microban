@@ -67,10 +67,31 @@ up as `null` rather than shifting the series.
 Quitting with `q` while a session is running still writes the file. Logs stay on the robot
 until you pull them over with `make get-logs`, which copies them into your local `logs/`.
 
-To inspect one, `uv run --group debug src/debug/plot_log.py` plots the newest log (pass a
-path for a specific one): goal against read position on top, velocity below, with a checkbox
-per joint to choose what is drawn. The `debug` group carries matplotlib for the scripts in
-`src/debug/`; it is not installed on the robot.
+If a policy (`walk`, `squat_rl`) goes active during the session, the moment it started is
+recorded as `policy_t0` in the log's metadata. A policy already running when you press `l`
+is not stamped, since its real start time falls outside the log.
+
+To inspect a log, `uv run --group debug src/debug/plot_log.py` plots the newest one (pass a
+path for a specific one). Tick a joint and it gets its own pair of plots — position (goal
+dashed, read solid) and velocity; untick to take it away. Nothing is plotted until you tick
+something. The `debug` group carries matplotlib for the scripts in `src/debug/`; it is not
+installed on the robot.
+
+Below the joints, `roll`, `pitch` and `gyro x/y/z` tick the same way, each taking a
+full-width row since they have no goal to compare against. Roll and pitch are the trunk's,
+in degrees, derived from the logged `body_quat`; the gyro is plotted raw, in the IMU sensor
+frame — the same signal the policies observe. Logs recorded before `body_quat` existed
+still offer the gyro, but not roll/pitch.
+
+Pass several logs to compare the same joint across runs, overlaid with one colour per log:
+
+```
+uv run --group debug src/debug/plot_log.py logs/a.json logs/b.json
+```
+
+When every log has a `policy_t0`, time is shifted so `t = 0` is the policy start in each
+run, lining the traces up however late you happened to press `l`. If any log lacks it, the
+comparison falls back to raw log time and says so.
 
 > While the name prompt is open, keys are captured by the prompt — `Ctrl+C` still stops
 > the control loop if you need it.

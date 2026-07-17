@@ -113,7 +113,7 @@ class MuJoCoController:
         }
 
         # BAM motor model — XL330 m6 (DC motor + Stribeck + load-dependent friction)
-        bam_model = bam_load_model(motor_name="xl330", model="m6")
+        bam_model = bam_load_model(motor_name="xl330", model="m4")
         bam_model.actuator.kp = KP_DEFAULT
         bam_model.actuator.vin = BAM_VIN
         self._bam = BamController(

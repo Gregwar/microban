@@ -30,6 +30,10 @@ class MotorCommand:
 class Move(ABC):
     """Base class for all motion behaviors."""
 
+    # True for moves driven by an RL policy. The scheduler stamps policy_t0 in the log
+    # when one of these goes active, so runs of the same manoeuvre can be time-aligned.
+    is_policy: bool = False
+
     def __init__(self) -> None:
         self.state: MoveState = MoveState.INACTIVE
 
