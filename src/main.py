@@ -12,6 +12,7 @@ from scheduler import Scheduler
 from input.actions import build_input_source
 from moves.rotate_head import RotateHeadMove
 from moves.squat import SquatMove
+from moves.squat_rl import SquatRlMove
 from moves.walk import WalkMove
 
 PID_FILE = Path("/tmp/microban_scheduler.pid")
@@ -73,6 +74,7 @@ def main() -> None:
             moves={
                 "head": RotateHeadMove(),
                 "squat": SquatMove(),
+                "squat_rl": SquatRlMove(controller=controller),
                 "walk": WalkMove(controller=controller),
             },
         )

@@ -25,7 +25,7 @@ VELOCITY_MAX = 1.0
 
 # Which moves can be toggled, and what toggles them. Single source of truth: change a
 # binding here and both the robot and the simulation follow.
-MOVE_KEYS = {"h": "head", "s": "squat", "v": "walk"}
+MOVE_KEYS = {"h": "head", "s": "squat", "v": "walk", "z": "squat_rl"}
 GAMEPAD_BUTTON_MOVES = {"A": "walk"}
 
 # Normalized key names.
