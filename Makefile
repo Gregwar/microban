@@ -1,7 +1,8 @@
-.PHONY: sync setup run stop shutdown voltage imu sim viewer get-logs gamepad-headless-enable gamepad-headless-disable
+.PHONY: sync setup run stop shutdown voltage imu sim viewer get-logs check-read set-baud gamepad-headless-enable gamepad-headless-disable
 
 HOST ?= microban
 ID ?=
+BAUD ?=
 
 sync:
 	rsync -avz \
@@ -11,6 +12,7 @@ sync:
 		--exclude='cad' \
 		--exclude='docs' \
 		--exclude='logs' \
+		--exclude='sd_card' \
 		--exclude='src/debug' \
 		--exclude='src/sim' \
 		--exclude='src/model/mjcf' \
@@ -41,6 +43,17 @@ voltage: sync
 
 imu: sync
 	ssh -tt $(HOST) "bash -l -c 'cd microban && PYTHONPATH=src .venv/bin/python src/imu.py'"
+
+# Verify the fused motor state read against the driver's own registers, and time it.
+# Read-only (no torque, no goal writes) — leave the robot still on the bench.
+check-read: sync
+	ssh -tt $(HOST) "bash -l -c 'cd microban && PYTHONPATH=src .venv/bin/python src/check_read.py'"
+
+# Change the motor bus rate: `make set-baud BAUD=2000000` (or 1000000 to go back).
+# Writes EEPROM — read src/set_baud.py before running. Update MOTOR_BAUDRATE afterwards.
+set-baud: sync
+	@test -n "$(BAUD)" || { echo "Usage: make set-baud BAUD=2000000"; exit 1; }
+	ssh -tt $(HOST) "bash -l -c 'cd microban && PYTHONPATH=src .venv/bin/python src/set_baud.py $(BAUD)'"
 
 shutdown:
 	ssh -tt $(HOST) "sudo shutdown -h now"
