@@ -74,6 +74,7 @@ class SquatMove(Move):
         for name, angle in NEUTRAL_POSE.items():
             self._robot.set_joint(name, angle)
         self._T_left_foot = np.eye(4)
+        self._robot.update_kinematics()
         self._robot.set_T_world_frame("left_foot", self._T_left_foot)
         self._robot.update_kinematics()
 
