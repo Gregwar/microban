@@ -50,7 +50,30 @@ by default; add `HOST=microban-ext` to operate over the secondary network (see t
 | `x` | reset velocity to zero |
 | `i` | toggle the IMU/gyro display |
 | `l` | start/stop logging (see below) |
+| `p` | toggle the scheduler timing display (see below) |
 | `q` | stop the control loop |
+
+## Timing the control loop
+
+Press `p` to report where each 20 ms tick goes, twice a second:
+
+```
+--------------------------------------------
+Timings over 25 ticks — budget 20.0 ms/tick
+  read  avg=  8.21  max= 12.05 ms
+  moves avg=  1.34  max=  2.02 ms
+  send  avg=  2.11  max=  3.44 ms
+  tick  avg= 11.66  max= 17.52 ms  (0 over budget)
+```
+
+`read` is the observer (the serial and IMU reads — usually the bulk of it on the robot),
+`moves` the policy or IK work, `send` the bus write (in simulation, the physics step and
+viewer sync), and `tick` the whole of it. Anything above the budget cannot keep 50 Hz, and
+is what the `control loop overrun` warnings report.
+
+Figures are averaged over the window rather than printed every tick: at 50 Hz a per-tick
+print would flood the terminal, and the writing would itself distort what is being
+measured. For the same reason the numbers exclude the timing and IMU displays themselves.
 
 ## Logging a session
 

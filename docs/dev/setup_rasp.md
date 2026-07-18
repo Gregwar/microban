@@ -235,6 +235,30 @@ cloud-init re-run, so the motors stay reachable.
 > UART stays on via `enable_uart=1` in `config.txt`, and you disable the console once
 > with `raspi-config` (Interface Options → Serial Port → login shell: No, hardware: Yes).
 
+### Motor bus baud rate
+
+The motors run at 1 Mbps by default (`constants.MOTOR_BAUDRATE`). Most of a 50 Hz control
+tick is spent reading positions and velocities over this bus, so raising the rate is the
+main lever on read latency — see `[p]` in [usage](../usage.md) and `make check-read`.
+
+`make set-baud BAUD=2000000` moves every motor to 2 Mbps; `BAUD=1000000` puts it back. The
+rate lives in the motors' **EEPROM**, so it persists across power cycles and the script
+cannot undo a bad write without a working bus. It is built to fail safe: it switches the
+head first (the only joint no policy drives) and proves the new rate works before touching
+the other 18, so a rate this Pi cannot reach strands one motor rather than all of them.
+
+After it succeeds, set `MOTOR_BAUDRATE` in `src/constants.py` to match — nothing talks to
+the motors at the new rate until you do — then `make setup && make run`.
+
+- **Why 2 Mbps and not more:** `ttyAMA0` is the PL011 (via `dtoverlay=miniuart-bt`), clocked
+  at 48 MHz. 2 Mbps divides it exactly; 3 Mbps is reachable but marginal; 4 Mbps needs a
+  sub-1 divisor the PL011 cannot produce, so the script refuses it — the motors would switch
+  and become unreachable.
+- **Recovery:** if a motor is stranded at a rate this Pi cannot generate, reach it with a
+  U2D2 and a PC (`rustypot_wizard`) and write its baud back. A run interrupted mid-way
+  leaves the bus split across two rates; just re-run `make set-baud` with the target and it
+  repairs the stragglers.
+
 ### Device permissions
 
 Reading `/dev/input/js*` requires membership in the `input` group (otherwise you'd
