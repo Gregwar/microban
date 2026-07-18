@@ -19,6 +19,12 @@ from bam.mujoco import MujocoController as BamController
 from constants import MOTOR_TO_ID, ID_TO_MOTOR, NEUTRAL_POSE, KP_DEFAULT, BAM_VIN, BAM_VOLTAGE_DROP_RESISTANCE, BAM_VIN_MIN, BAM_MAX_CURRENT
 
 
+# Trunk height to spawn at. In the neutral pose the feet just graze the floor at 0.1727 m,
+# so start a hair above that: any lower and the robot spawns interpenetrating the ground and
+# the contact solver ejects it.
+SPAWN_HEIGHT: float = 0.174
+
+
 class _DelayBuffer:
     """Returns values delayed by n_steps ticks (0 = no delay)."""
 
@@ -83,14 +89,26 @@ class MuJoCoController:
             self._model.body_ipos[trunk_id, 1] += trunk_com_offset[1]
             self._model.body_ipos[trunk_id, 2] += trunk_com_offset[2]
 
-        # Set initial pose to neutral so the robot starts upright
-        self._data.qpos[2] = 0.165
-        for name, angle in NEUTRAL_POSE.items():
-            if name in self._name_to_qpos_idx:
-                self._data.qpos[self._name_to_qpos_idx[name]] = angle
-        mujoco.mj_forward(self._model, self._data)
+        # BAM motor model — XL330 m6 (DC motor + Stribeck + load-dependent friction)
+        # Built before the pose is set: its constructor calls mj_setConst(), which resets
+        # the data back to qpos0. Set the pose first and it silently lands at the origin,
+        # buried in the floor, and the contact solver ejects it on the first step.
+        bam_model = bam_load_model(motor_name="xl330", model="m6")
+        bam_model.actuator.kp = KP_DEFAULT
+        bam_model.actuator.vin = BAM_VIN
+        self._bam = BamController(
+            bam_model,
+            list(MOTOR_TO_ID.keys()),
+            self._model,
+            self._data,
+            vin_drop_resistance=BAM_VOLTAGE_DROP_RESISTANCE,
+            vin_min=BAM_VIN_MIN
+        )
 
-        # Delay buffers — simulate sensor/communication latency
+        # Start from the same state [r] resets to, so a fresh run and a reset are identical.
+        self._set_neutral_state()
+
+        # Delay buffers — simulate sensor/communication latency. Seeded from the pose above.
         self._delay_pos = {
             mid: _DelayBuffer(
                 self._data.qpos[self._name_to_qpos_idx[ID_TO_MOTOR[mid]]],
@@ -111,19 +129,6 @@ class MuJoCoController:
             )
             for mid in MOTOR_TO_ID.values()
         }
-
-        # BAM motor model — XL330 m6 (DC motor + Stribeck + load-dependent friction)
-        bam_model = bam_load_model(motor_name="xl330", model="m6")
-        bam_model.actuator.kp = KP_DEFAULT
-        bam_model.actuator.vin = BAM_VIN
-        self._bam = BamController(
-            bam_model,
-            list(MOTOR_TO_ID.keys()),
-            self._model,
-            self._data,
-            vin_drop_resistance=BAM_VOLTAGE_DROP_RESISTANCE,
-            vin_min=BAM_VIN_MIN
-        )
 
         self._viewer = mujoco.viewer.launch_passive(
             self._model, self._data, key_callback=key_callback
@@ -249,17 +254,31 @@ class MuJoCoController:
             current = (float(w), float(x), float(y), float(z))
         return self._delay_quat.push_and_read(current)
 
-    def reset(self) -> None:
-        """Reset the simulation to the initial neutral standing pose."""
+    def _set_neutral_state(self) -> None:
+        """Put the model in the neutral standing pose, at rest and clear of the floor.
+
+        Shared by startup and [r] so both land in exactly the same state.
+        """
         self._data.qpos[:] = 0.0
         self._data.qvel[:] = 0.0
         self._data.ctrl[:] = 0.0
-        self._data.qpos[2] = 0.165
+        self._data.qpos[2] = SPAWN_HEIGHT
+        self._data.qpos[3] = 1.0  # free-joint quaternion (w, x, y, z), upright
         for name, angle in NEUTRAL_POSE.items():
             if name in self._name_to_qpos_idx:
                 self._data.qpos[self._name_to_qpos_idx[name]] = angle
         mujoco.mj_forward(self._model, self._data)
+
+    def reset(self) -> None:
+        """Reset the simulation to the initial neutral standing pose."""
+        self._set_neutral_state()
+        # Flush the delay buffers too, so the first ticks after a reset don't replay
+        # readings captured while the robot was falling.
         for mid in MOTOR_TO_ID.values():
             neutral = self._data.qpos[self._name_to_qpos_idx[ID_TO_MOTOR[mid]]]
             self._delay_act[mid].fill(neutral)
+            self._delay_pos[mid].fill(neutral)
+            self._delay_vel[mid].fill(0.0)
+        self._delay_gyro.fill((0.0, 0.0, 0.0))
+        self._delay_quat.fill((1.0, 0.0, 0.0, 0.0))
         self._viewer.sync()
