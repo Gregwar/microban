@@ -63,12 +63,25 @@ class Observer:
         # One bus transaction instead of two (three with current) where the controller
         # supports it and has verified it against its own per-register reads.
         if getattr(self.controller, "fused_read_enabled", False):
-            angles, velocities, currents = self.controller.sync_read_state(motor_ids)
+            # Widening the block to reach the voltage register keeps it to one transaction;
+            # only worth it when voltage is actually wanted, since it costs 10 bytes per
+            # motor. Falls back to a separate read if that offset did not verify.
+            fused_voltage = self.observe_voltage and getattr(
+                self.controller, "fused_voltage_enabled", False
+            )
+            angles, velocities, currents, voltages = self.controller.sync_read_state(
+                motor_ids, include_voltage=fused_voltage
+            )
             state.motor_positions = dict(zip(motor_names, angles))
             state.motor_velocities = dict(zip(motor_names, velocities))
+            # Current rides along in the same block at no extra cost, so there is nothing
+            # to gate it on beyond whether anyone asked for it.
             if self.observe_current:
                 state.motor_currents = dict(zip(motor_names, currents))
+            if fused_voltage:
+                state.motor_voltages = dict(zip(motor_names, voltages))
         else:
+            fused_voltage = False
             angles = self.controller.sync_read_present_position(motor_ids)
             state.motor_positions = dict(zip(motor_names, angles))
 
@@ -79,7 +92,7 @@ class Observer:
                 currents = self.controller.sync_read_present_current(motor_ids)
                 state.motor_currents = dict(zip(motor_names, currents))
 
-        if self.observe_voltage:
+        if self.observe_voltage and not fused_voltage:
             voltages = self.controller.sync_read_present_input_voltage(motor_ids)
             state.motor_voltages = dict(zip(motor_names, voltages))
 

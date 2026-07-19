@@ -2,17 +2,20 @@
 # Copyright 2026 Marc Duclusaud
 
 import os
+from dataclasses import dataclass
 
 from rustypot import Xl330PyController
 import numpy as np
 
-from constants import MOTOR_TO_ID, MOTOR_SIGN, IMU_I2C_BUS, MOTOR_BAUDRATE, PRESENT_CURRENT_UNIT_A
+from constants import MOTOR_TO_ID, MOTOR_SIGN, IMU_I2C_BUS, MOTOR_BAUDRATE, PRESENT_CURRENT_UNIT_A, PRESENT_VOLTAGE_UNIT_V
 from imu_reader import ThreadedIMUReader
 from xl330_state import (
     STATE_ADDR,
+    STATE_EXT_LEN,
     STATE_LEN,
     VELOCITY_UNIT_RAD_S,
     decode_state_block,
+    decode_state_block_ext,
     ticks_to_radians,
 )
 
@@ -20,6 +23,37 @@ from xl330_state import (
 # with the robot at rest, or it is not trusted. One tick is 2*pi/4096 ~= 1.5 mrad, so this
 # allows a couple of ticks of jitter between the two reads and nothing more.
 FUSED_POSITION_TOLERANCE_RAD = 0.01
+
+# Same idea for the widened block's voltage field. The register quantises to 0.1 V and the
+# supply moves between the two reads, so this only has to catch a wrong offset — which
+# would land in a trajectory register and be wrong by volts, not by tenths.
+FUSED_VOLTAGE_TOLERANCE_V = 0.5
+
+
+@dataclass
+class BusStats:
+    """Protocol 2.0 traffic counters, reported by [p] alongside the timings.
+
+    Counts packets, not calls: one sync transaction is a single broadcast instruction
+    packet, answered by one status packet per motor. Writes are not counted as expecting
+    an answer — main.py sets status_return_level to 1, so the motors only reply to reads.
+    """
+
+    sent: int = 0        # instruction packets put on the wire
+    received: int = 0    # status packets that came back
+    expected: int = 0    # status packets that should have come back
+    errors: int = 0      # transactions that raised (timeout, port error)
+    malformed: int = 0   # status payloads that would not decode
+    fallbacks: int = 0   # fused reads that had to retry as separate typed reads
+
+    @property
+    def missing(self) -> int:
+        """Status packets never received — a motor that did not answer in time."""
+        return max(0, self.expected - self.received)
+
+    @property
+    def error_total(self) -> int:
+        return self.errors + self.malformed + self.missing
 
 
 class RobotController:
@@ -50,9 +84,72 @@ class RobotController:
         self._imu_reader = ThreadedIMUReader(i2c_bus=IMU_I2C_BUS, frequency_hz=200.0)
         self._imu_reader.start()
 
+        self.stats = BusStats()
         self._fused_fallbacks = 0
         mode = (fused_read or os.environ.get("MICROBAN_FUSED_READ", "auto")).lower()
         self.fused_read_enabled = self._resolve_fused_read(mode)
+        # Whether the widened block (reaching Present Input Voltage) is trustworthy too.
+        # Checked separately: the base block can be sound while the wider offset is not,
+        # and in that case voltage should cost a second read rather than return nonsense.
+        self.fused_voltage_enabled = (
+            self._resolve_fused_voltage() if self.fused_read_enabled else False
+        )
+
+    # ------------------------------------------------------------------
+    # Bus accounting
+
+    def _read(self, fn, ids, *args):
+        """Run one read transaction, counting the packets it sent and got back.
+
+        Every bus read goes through here so the [p] report reflects the whole session
+        rather than whichever call sites were remembered.
+        """
+        self.stats.sent += 1
+        self.stats.expected += len(ids)
+        try:
+            result = fn(ids, *args)
+        except Exception:
+            self.stats.errors += 1
+            raise
+        # A driver that drops a silent motor returns a short list; count the gap rather
+        # than assuming every read was answered in full.
+        self.stats.received += len(result) if hasattr(result, "__len__") else 1
+        return result
+
+    def _read_one(self, fn, motor_id, *args):
+        """Same, for the single-motor reads."""
+        self.stats.sent += 1
+        self.stats.expected += 1
+        try:
+            result = fn(motor_id, *args)
+        except Exception:
+            self.stats.errors += 1
+            raise
+        self.stats.received += 1
+        return result
+
+    def _write(self, fn, ids, *args) -> None:
+        """Run one write transaction. No status packet is expected (return level 1)."""
+        self.stats.sent += 1
+        try:
+            fn(ids, *args)
+        except Exception:
+            self.stats.errors += 1
+            raise
+
+    def get_bus_stats(self) -> dict:
+        """Snapshot of the traffic counters, for the scheduler's [p] report."""
+        s = self.stats
+        return {
+            "sent": s.sent,
+            "received": s.received,
+            "expected": s.expected,
+            "missing": s.missing,
+            "errors": s.errors,
+            "malformed": s.malformed,
+            "fallbacks": s.fallbacks,
+            "error_total": s.error_total,
+        }
 
     # ------------------------------------------------------------------
     # Fused state read
@@ -74,6 +171,42 @@ class RobotController:
             print(f"Fused motor read disabled — {detail}")
         return ok
 
+    def _resolve_fused_voltage(self) -> bool:
+        """Check the widened block's voltage field against the driver's own read."""
+        ok, detail = self.check_fused_voltage()
+        if ok:
+            print(f"Fused voltage read enabled ({detail}).")
+        else:
+            print(f"Fused voltage read disabled — {detail}")
+        return ok
+
+    def check_fused_voltage(self) -> tuple[bool, str]:
+        """Verify Present Input Voltage really is where the widened block expects it.
+
+        A wrong offset here would land in Velocity/Position Trajectory and quietly report
+        those as volts, so the address is checked rather than trusted — the same treatment
+        the base block gets.
+        """
+        ids = list(MOTOR_TO_ID.values())
+        try:
+            _, _, _, voltages = self.sync_read_state(ids, include_voltage=True)
+            reference = self.sync_read_present_input_voltage(ids)
+        except Exception as exc:
+            return False, f"the check itself failed: {exc!r}"
+
+        if len(voltages) != len(reference):
+            return False, f"got {len(voltages)} motors, expected {len(reference)}"
+
+        deviations = [abs(a - b) for a, b in zip(voltages, reference)]
+        worst = max(deviations)
+        if worst > FUSED_VOLTAGE_TOLERANCE_V:
+            motor = list(MOTOR_TO_ID)[deviations.index(worst)]
+            return False, (
+                f"voltages disagree with the driver by up to {worst:.2f} V on {motor} "
+                f"(tolerance {FUSED_VOLTAGE_TOLERANCE_V}); voltage will cost a second read"
+            )
+        return True, f"matches the driver within {worst:.2f} V"
+
     def check_fused_read(self) -> tuple[bool, str]:
         """Compare one fused read against the driver's per-register reads.
 
@@ -84,7 +217,7 @@ class RobotController:
         """
         ids = list(MOTOR_TO_ID.values())
         try:
-            positions, _, _ = self.sync_read_state(ids)
+            positions, _, _, _ = self.sync_read_state(ids)
             reference = self.sync_read_present_position(ids)
         except Exception as exc:
             return False, f"the check itself failed: {exc!r}"
@@ -102,40 +235,56 @@ class RobotController:
             )
         return True, f"matches the driver within {worst:.4f} rad"
 
-    def sync_read_state(self, ids: list[int]) -> tuple[list[float], list[float], list[float]]:
-        """Positions [rad], velocities [rad/s] and currents [A] in ONE bus transaction.
+    def sync_read_state(
+        self, ids: list[int], include_voltage: bool = False
+    ) -> tuple[list[float], list[float], list[float], list[float]]:
+        """Positions [rad], velocities [rad/s], currents [A] and voltages [V] in ONE read.
 
         Replaces the separate position and velocity sync reads, which cost a full round
         trip each over all 19 motors. Current comes along for the ride, for a few extra
         bytes rather than a third round trip.
 
-        Blocks come back longer than STATE_LEN when Protocol 2.0 stuffs an extra 0xFD into
+        With `include_voltage`, the block is widened to reach Present Input Voltage as
+        well — still one transaction, at the cost of reading through the two trajectory
+        registers in between. Cheaper than a second round trip; see xl330_state. Voltages
+        come back empty when not asked for.
+
+        Blocks come back longer than expected when Protocol 2.0 stuffs an extra 0xFD into
         the payload (the negative velocity/current values seen while moving produce the
-        0xFF 0xFF 0xFD trigger). decode_state_block un-stuffs those on the fast path, so
-        stuffing no longer forces a fallback — verified against real motor frames. The
-        fallback below now only catches genuinely malformed reads (a short frame, a motor
-        that missed its reply), which stay rare.
+        0xFF 0xFF 0xFD trigger). The decoder un-stuffs those on the fast path, so stuffing
+        no longer forces a fallback — verified against real motor frames. The fallback
+        below now only catches genuinely malformed reads (a short frame, a motor that
+        missed its reply), which stay rare.
         """
-        blocks = self._controller.sync_read_raw_data(ids, STATE_ADDR, STATE_LEN)
+        length = STATE_EXT_LEN if include_voltage else STATE_LEN
+        decode = decode_state_block_ext if include_voltage else decode_state_block
+        blocks = self._read(self._controller.sync_read_raw_data, ids, STATE_ADDR, length)
 
         positions: list[float] = []
         velocities: list[float] = []
         currents: list[float] = []
+        voltages: list[float] = []
         for motor_id, block in zip(ids, blocks):
             try:
-                current_raw, velocity_raw, position_ticks = decode_state_block(block)
+                decoded = decode(block)
             except ValueError:
-                return self._read_state_separately(ids)
+                self.stats.malformed += 1
+                return self._read_state_separately(ids, include_voltage)
+            current_raw, velocity_raw, position_ticks = decoded[:3]
             sign = self._id_to_sign[motor_id]
             positions.append(ticks_to_radians(position_ticks) * sign)
             velocities.append(velocity_raw * VELOCITY_UNIT_RAD_S * sign)
             currents.append(current_raw * PRESENT_CURRENT_UNIT_A)
+            if include_voltage:
+                voltages.append(decoded[3] * PRESENT_VOLTAGE_UNIT_V)
 
         if len(positions) != len(ids):  # short read (e.g. a motor missed the reply)
-            return self._read_state_separately(ids)
-        return positions, velocities, currents
+            return self._read_state_separately(ids, include_voltage)
+        return positions, velocities, currents, voltages
 
-    def _read_state_separately(self, ids: list[int]) -> tuple[list[float], list[float], list[float]]:
+    def _read_state_separately(
+        self, ids: list[int], include_voltage: bool = False
+    ) -> tuple[list[float], list[float], list[float], list[float]]:
         """The safe fallback: the driver's typed reads, which handle byte stuffing.
 
         Slower than the fused read (three round trips instead of one), but only taken on
@@ -143,6 +292,7 @@ class RobotController:
         majority of reads.
         """
         self._fused_fallbacks += 1
+        self.stats.fallbacks = self._fused_fallbacks
         if self._fused_fallbacks in (1, 100) or self._fused_fallbacks % 1000 == 0:
             print(
                 f"Note: fused read fell back to separate reads (byte-stuffed frame); "
@@ -153,55 +303,62 @@ class RobotController:
         positions = self.sync_read_present_position(ids)
         velocities = self.sync_read_present_velocity(ids)
         currents = self.sync_read_present_current(ids)
-        return positions, velocities, currents
+        voltages = self.sync_read_present_input_voltage(ids) if include_voltage else []
+        return positions, velocities, currents, voltages
 
     def sync_write_torque_enable(self, ids: list[int], values: list[bool]) -> None:
-        self._controller.sync_write_torque_enable(ids, values)
+        self._write(self._controller.sync_write_torque_enable, ids, values)
 
     def sync_write_status_return_level(self, ids: list[int], levels: list[int]) -> None:
-        self._controller.sync_write_status_return_level(ids, levels)
+        self._write(self._controller.sync_write_status_return_level, ids, levels)
 
     def sync_write_goal_position(self, ids: list[int], positions: list[float]) -> None:
         hw_positions = [pos * self._id_to_sign[motor_id] for motor_id, pos in zip(ids, positions)]
-        self._controller.sync_write_goal_position(ids, hw_positions)
+        self._write(self._controller.sync_write_goal_position, ids, hw_positions)
 
     def sync_read_present_position(self, ids: list[int]) -> list[float]:
-        raw = self._controller.sync_read_present_position(ids)
+        raw = self._read(self._controller.sync_read_present_position, ids)
         return [r * self._id_to_sign[motor_id] for motor_id, r in zip(ids, raw)]
 
     def read_present_position(self, motor_id: int) -> float:
-        raw = self._controller.read_present_position(motor_id)
+        raw = self._read_one(self._controller.read_present_position, motor_id)
         return raw * self._id_to_sign[motor_id]
 
     def sync_read_present_velocity(self, ids: list[int]) -> list[float]:
-        raw = np.array(self._controller.sync_read_present_velocity(ids)) * 0.229 * np.pi / 30
+        raw = np.array(self._read(self._controller.sync_read_present_velocity, ids)) * 0.229 * np.pi / 30
         return [r * self._id_to_sign[motor_id] for motor_id, r in zip(ids, raw)]
     
     def read_present_velocity(self, motor_id: int) -> float:
-        raw = self._controller.read_present_velocity(motor_id) * 0.229 * np.pi / 30
+        raw = self._read_one(self._controller.read_present_velocity, motor_id) * 0.229 * np.pi / 30
         return raw * self._id_to_sign[motor_id]
 
     def sync_read_present_current(self, ids: list[int]) -> list[float]:
         """Present current per motor, in Amps (signed). Magnitude is what matters for the BMS budget."""
-        raw = self._controller.sync_read_present_current(ids)
+        raw = self._read(self._controller.sync_read_present_current, ids)
         return [
             (r[0] if isinstance(r, (list, tuple)) else float(r)) * PRESENT_CURRENT_UNIT_A
             for r in raw
         ]
 
     def sync_read_present_input_voltage(self, ids: list[int]) -> list[float]:
-        raw = self._controller.sync_read_present_input_voltage(ids)
-        return [r[0] if isinstance(r, (list, tuple)) else float(r) for r in raw]
+        """Supply voltage per motor, in Volts. The register counts 0.1 V/LSB."""
+        raw = self._read(self._controller.sync_read_present_input_voltage, ids)
+        return [
+            (r[0] if isinstance(r, (list, tuple)) else float(r)) * PRESENT_VOLTAGE_UNIT_V
+            for r in raw
+        ]
 
     def read_present_input_voltage(self, motor_id: int) -> float:
-        raw = self._controller.read_present_input_voltage(motor_id)
-        return raw[0] if isinstance(raw, (list, tuple)) else float(raw)
+        """Supply voltage for one motor, in Volts."""
+        raw = self._read_one(self._controller.read_present_input_voltage, motor_id)
+        value = raw[0] if isinstance(raw, (list, tuple)) else float(raw)
+        return value * PRESENT_VOLTAGE_UNIT_V
 
     def sync_read_kp(self, ids: list[int]) -> list[int]:
-        return [int(v) for v in self._controller.sync_read_position_p_gain(ids)]
+        return [int(v) for v in self._read(self._controller.sync_read_position_p_gain, ids)]
 
     def sync_write_kp(self, ids: list[int], gains: list[int]) -> None:
-        self._controller.sync_write_position_p_gain(ids, gains)
+        self._write(self._controller.sync_write_position_p_gain, ids, gains)
 
     def read_acc(self) -> tuple[float, float, float]:
         """Return raw accelerometer (ax, ay, az) in g."""

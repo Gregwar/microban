@@ -76,6 +76,10 @@ class RobotLogger:
             "target_position": {name: [] for name in MOTOR_TO_ID},
             "position": {name: [] for name in MOTOR_TO_ID},
             "velocity": {name: [] for name in MOTOR_TO_ID},
+            # Servo input voltage and present current, only read while [u] is on. Null on
+            # ticks where they were not read, so the channels stay aligned with "time".
+            "voltage": {name: [] for name in MOTOR_TO_ID},
+            "current": {name: [] for name in MOTOR_TO_ID},
             "gyro": {axis: [] for axis in ("x", "y", "z")},
             "quat": {axis: [] for axis in ("w", "x", "y", "z")},
             # Orientation in the trunk frame. The raw quat above is in the IMU sensor
@@ -116,6 +120,8 @@ class RobotLogger:
             s["target_position"][name].append(_as_float(target_angles.get(name)))
             s["position"][name].append(_as_float(robot_state.motor_positions.get(name)))
             s["velocity"][name].append(_as_float(robot_state.motor_velocities.get(name)))
+            s["voltage"][name].append(_as_float(robot_state.motor_voltages.get(name)))
+            s["current"][name].append(_as_float(robot_state.motor_currents.get(name)))
 
         # The IMU read can fail — the observer leaves the field empty rather than raising,
         # so pad with null to keep every channel the same length as "time".

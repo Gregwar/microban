@@ -15,7 +15,7 @@ from moves.move import MotorCommand, Move, MoveState
 LOGGING = False
 
 # Policy name
-AGENT_NAME = "walk.onnx"
+AGENT_NAME = "walk_m6_v2.onnx"
 
 
 class WalkMove(Move):

@@ -81,7 +81,7 @@ def main() -> None:
     print("\n=== 2. Repeatability (robot must be still) ===")
     spreads = []
     for _ in range(10):
-        pos, _, _ = robot.sync_read_state(ids)
+        pos, _, _, _ = robot.sync_read_state(ids)
         spreads.append(pos)
     per_motor = [max(s[i] for s in spreads) - min(s[i] for s in spreads) for i in range(len(ids))]
     print(f"  position spread over 10 fused reads: max {max(per_motor):.5f} rad (noise, not drift)")
@@ -100,9 +100,27 @@ def main() -> None:
         ),
     )
     fused = bench("fused (position+velocity+current)", lambda: robot.sync_read_state(ids))
+    separate_volt = bench(
+        "separate + voltage (4 reads)",
+        lambda: (
+            driver.sync_read_present_position(ids),
+            driver.sync_read_present_velocity(ids),
+            driver.sync_read_present_current(ids),
+            driver.sync_read_present_input_voltage(ids),
+        ),
+    )
+    fused_volt = bench(
+        "fused + voltage (widened block)",
+        lambda: robot.sync_read_state(ids, include_voltage=True),
+    )
 
     print()
     print(f"  fused vs 2 separate reads: {separate - fused:+.2f} ms  ({100 * (separate - fused) / separate:+.0f}%)")
+    print(
+        f"  widened vs separate voltage: {separate_volt - fused_volt:+.2f} ms  "
+        f"({100 * (separate_volt - fused_volt) / separate_volt:+.0f}%)"
+    )
+    print(f"  cost of widening the block: {fused_volt - fused:+.2f} ms")
     print(f"  fused vs 3 separate reads: {separate_cur - fused:+.2f} ms  ({100 * (separate_cur - fused) / separate_cur:+.0f}%)")
     print("  budget at 50 Hz is 20.00 ms per tick")
 

@@ -10,6 +10,7 @@ from constants import MOTOR_TO_ID, NEUTRAL_POSE, KP_DEFAULT
 from robot_controller import RobotController
 from scheduler import Scheduler
 from input.actions import build_input_source
+from moves.benchmark import BenchmarkMove
 from moves.rotate_head import RotateHeadMove
 from moves.squat import SquatMove
 from moves.squat_rl import SquatRlMove
@@ -73,6 +74,7 @@ def main() -> None:
             input_source=build_input_source(),
             moves={
                 "head": RotateHeadMove(),
+                "benchmark": BenchmarkMove(),
                 "squat": SquatMove(),
                 "squat_rl": SquatRlMove(controller=controller),
                 "walk": WalkMove(controller=controller),

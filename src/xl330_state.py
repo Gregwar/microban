@@ -22,6 +22,14 @@ STATE_ADDR = 126
 STATE_LEN = 10
 _STATE_STRUCT = struct.Struct("<hii")
 
+# Present Input Voltage (144, 2 B, u16) sits ten bytes past the end of that block, with
+# Velocity Trajectory (136, 4 B) and Position Trajectory (140, 4 B) in between. Reading
+# through them costs 10 unwanted bytes per motor — 190 bytes, about 1 ms at 2 Mbps —
+# against a whole extra round trip with its own turnaround on all 19 motors. So when
+# voltage is wanted, it is cheaper to widen this read than to issue a second one.
+STATE_EXT_LEN = 20
+_STATE_EXT_STRUCT = struct.Struct("<hiiiiH")
+
 # Present Position is an absolute encoder count over one turn, centred at half scale.
 POSITION_TICKS_PER_TURN = 4096
 POSITION_CENTER_TICKS = 2048
@@ -56,20 +64,37 @@ def unstuff(data: bytes) -> bytes:
     return bytes(out)
 
 
-def decode_state_block(block) -> tuple[int, int, int]:
-    """Split one motor's block into raw (current, velocity, position ticks).
+def _unstuffed(block, length: int) -> bytes:
+    """Un-stuff one motor's block and check it came back the expected width.
 
     Byte stuffing is undone first, so a stuffed frame decodes on the fast path rather than
-    forcing a fallback. Anything that is still not STATE_LEN afterwards (a short read, a
+    forcing a fallback. Anything that is still the wrong length afterwards (a short read, a
     doubly-corrupted frame) raises, and the caller falls back to the driver's typed reads.
 
     The driver hands the block back as a sequence of byte values; accept anything
     bytes-like so a list, bytearray or bytes all work.
     """
     data = unstuff(bytes(bytearray(block)))
-    if len(data) != STATE_LEN:
-        raise ValueError(f"Expected a {STATE_LEN}-byte state block, got {len(data)} bytes")
-    return _STATE_STRUCT.unpack(data)
+    if len(data) != length:
+        raise ValueError(f"Expected a {length}-byte state block, got {len(data)} bytes")
+    return data
+
+
+def decode_state_block(block) -> tuple[int, int, int]:
+    """Split one motor's block into raw (current, velocity, position ticks)."""
+    return _STATE_STRUCT.unpack(_unstuffed(block, STATE_LEN))
+
+
+def decode_state_block_ext(block) -> tuple[int, int, int, int]:
+    """Same for the widened block: raw (current, velocity, position ticks, voltage).
+
+    The two trajectory registers read through on the way to the voltage are unpacked and
+    dropped — they are the price of the single round trip, not something we want.
+    """
+    current, velocity, position, _vel_traj, _pos_traj, voltage = _STATE_EXT_STRUCT.unpack(
+        _unstuffed(block, STATE_EXT_LEN)
+    )
+    return current, velocity, position, voltage
 
 
 def ticks_to_radians(ticks: int) -> float:
@@ -85,3 +110,17 @@ def radians_to_ticks(radians: float) -> int:
 def encode_state_block(current_raw: int, velocity_raw: int, position_ticks: int) -> bytes:
     """Build a block as a motor would return it. Only used to test the decoder."""
     return _STATE_STRUCT.pack(current_raw, velocity_raw, position_ticks)
+
+
+def encode_state_block_ext(
+    current_raw: int,
+    velocity_raw: int,
+    position_ticks: int,
+    voltage_raw: int,
+    vel_traj: int = 0,
+    pos_traj: int = 0,
+) -> bytes:
+    """Build a widened block as a motor would return it. Only used to test the decoder."""
+    return _STATE_EXT_STRUCT.pack(
+        current_raw, velocity_raw, position_ticks, vel_traj, pos_traj, voltage_raw
+    )

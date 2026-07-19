@@ -13,7 +13,8 @@ import argparse
 from scheduler import Scheduler
 from input.actions import build_input_source
 from sim.debug_keys import SimDebugKeys
-from sim.mujoco_controller import MuJoCoController
+from sim.mujoco_controller import VELOCITY_FD_DT, MuJoCoController
+from moves.benchmark import BenchmarkMove
 from moves.rotate_head import RotateHeadMove
 from moves.squat import SquatMove
 from moves.squat_rl import SquatRlMove
@@ -29,6 +30,7 @@ def main() -> None:
     parser.add_argument("--delay-gyro", type=int, default=3, metavar="TICKS", help="Gyro read delay in ticks")
     parser.add_argument("--delay-quat", type=int, default=4, metavar="TICKS", help="Quaternion (projected gravity) read delay in ticks")
     parser.add_argument("--trunk-com-offset", type=float, nargs=3, default=[0.0, 0.0, 0.0], metavar=("X", "Y", "Z"), help="CoM offset on trunk body in meters (body frame)")
+    parser.add_argument("--fd-velocity", action="store_true", help=f"Estimate joint velocity by finite differences over {VELOCITY_FD_DT * 1e3:.0f} ms instead of reading the simulator's qvel")
     args = parser.parse_args()
 
     # Exactly what main.py does on the robot: gamepad when connected, keyboard otherwise.
@@ -45,6 +47,7 @@ def main() -> None:
         delay_gyro_ticks=args.delay_gyro,
         delay_quat_ticks=args.delay_quat,
         trunk_com_offset=tuple(args.trunk_com_offset),
+        velocity_finite_difference=args.fd_velocity,
     )
     for line in debug_keys.help_lines():
         print(line)
@@ -55,6 +58,7 @@ def main() -> None:
         input_source=input_source,
         moves={
             "head": RotateHeadMove(),
+            "benchmark": BenchmarkMove(),
             "squat": SquatMove(),
             "squat_rl": SquatRlMove(controller=controller),
             "walk": WalkMove(controller=controller),

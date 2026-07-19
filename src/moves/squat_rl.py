@@ -22,7 +22,7 @@ AGENT_NAME = "squat_m6.onnx"
 # in [0.0, 0.05] m and frequency in [0.2, 0.8] Hz — outside those ranges you are asking it
 # for a target it never saw during training.
 SQUAT_CENTER_HEIGHT = 0.14  # metres, mean trunk height the sine oscillates around
-SQUAT_AMPLITUDE = 0.02      # metres, half the peak-to-peak squat depth
+SQUAT_AMPLITUDE = 0.015      # metres, half the peak-to-peak squat depth
 SQUAT_FREQUENCY = 0.25       # Hz
 
 

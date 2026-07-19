@@ -66,6 +66,8 @@ class Scheduler:
 
         self.loop_start_time = time.perf_counter()
         self._serial_errors = 0
+        # Cumulative, unlike _serial_errors above, which resets after every good read.
+        self._serial_errors_total = 0
         self._last_imu_print_s: float = 0.0
         self._last_imu_stale_warn_s: float = 0.0
         self._timings: dict[str, list[float]] = {}
@@ -99,6 +101,7 @@ class Scheduler:
                     robot_state = self.observer.read_state(self.dt)
                 except RuntimeError as e:
                     self._serial_errors += 1
+                    self._serial_errors_total += 1
                     if self._serial_errors >= 3:
                         print(f"Serial communication error: {e}", end="\r\n", flush=True)
                         break
@@ -110,6 +113,11 @@ class Scheduler:
                 robot_state.time_s = start_time - self.loop_start_time
                 user_input = self.input_source.read() if self.input_source else UserInput()
                 user_input.velocity = scale_velocity(user_input.velocity)
+                # Applies from the next tick: the state above was already read with the
+                # previous setting. Current comes with the fused block for free, so [u]
+                # turns on both telemetry channels rather than only voltage.
+                self.observer.observe_voltage = user_input.read_voltage
+                self.observer.observe_current = user_input.read_voltage
                 obs = Observation(robot_state=robot_state, user_input=user_input)
 
                 imu_status_getter = getattr(self.controller, "get_imu_status", None)
@@ -250,9 +258,38 @@ class Scheduler:
             over = f"  ({self._timing_overruns} over budget)" if name == "tick" else ""
             print(f"  {name:<5} avg={avg_ms:6.2f}  max={max_ms:6.2f} ms{over}", end="\r\n", flush=True)
 
+        self._print_bus_stats()
+
         self._timings.clear()
         self._timing_overruns = 0
         self._last_timing_print_s = now
+
+    def _print_bus_stats(self) -> None:
+        """Report bus traffic and communication faults, session-cumulative.
+
+        Counters run from startup rather than over the timing window, so a fault that
+        happened once during a run stays visible instead of scrolling away. Silent on
+        controllers that do not track them (the simulation).
+        """
+        getter = getattr(self.controller, "get_bus_stats", None)
+        if not callable(getter):
+            return
+
+        s = getter()
+        loss = (s["missing"] / s["expected"] * 100.0) if s["expected"] else 0.0
+        errors = s["error_total"] + self._serial_errors_total
+
+        print(
+            f"  packets  sent={s['sent']}  received={s['received']}/{s['expected']}"
+            f"  ({loss:.2f}% missing)",
+            end="\r\n",
+            flush=True,
+        )
+        detail = (
+            f"missing={s['missing']} timeouts={s['errors']} malformed={s['malformed']} "
+            f"retries={s['fallbacks']} loop={self._serial_errors_total}"
+        )
+        print(f"  errors   {errors} total — {detail}", end="\r\n", flush=True)
 
     def _update_logging(self, obs: Observation, command: MotorCommand) -> None:
         """Start, feed or stop the log session to follow the [l] toggle."""

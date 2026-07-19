@@ -25,7 +25,7 @@ VELOCITY_MAX = 1.0
 
 # Which moves can be toggled, and what toggles them. Single source of truth: change a
 # binding here and both the robot and the simulation follow.
-MOVE_KEYS = {"h": "head", "s": "squat", "v": "walk", "z": "squat_rl"}
+MOVE_KEYS = {"h": "head", "s": "squat", "v": "walk", "z": "squat_rl", "b": "benchmark"}
 GAMEPAD_BUTTON_MOVES = {"A": "walk"}
 
 # Normalized key names.
@@ -40,6 +40,9 @@ KEY_LOG = "l"
 # [t] would read better, but the MuJoCo viewer already uses it for the torque display and
 # a key meaning two things across the two windows is worse than a less obvious letter.
 KEY_TIMINGS = "p"
+# [v] is taken by the walk move; [u] is the usual symbol for voltage anyway. Also
+# turns on the current read, which the widened bus block brings back alongside it.
+KEY_VOLTAGE = "u"
 
 
 class InputActions(InputSource):
@@ -63,6 +66,7 @@ class InputActions(InputSource):
                 velocity=dict(self._state.velocity),
                 show_imu=self._state.show_imu,
                 show_timings=self._state.show_timings,
+                read_voltage=self._state.read_voltage,
                 logging=self._state.logging,
                 log_name=self._state.log_name,
             )
@@ -120,6 +124,13 @@ class InputActions(InputSource):
             show = self._state.show_timings
         self.notify(f"Timing display {'enabled' if show else 'disabled'}")
 
+    def toggle_voltage(self) -> None:
+        """Toggle reading servo voltage and current (widens the state read each tick)."""
+        with self._lock:
+            self._state.read_voltage = not self._state.read_voltage
+            read = self._state.read_voltage
+        self.notify(f"Voltage + current read {'enabled' if read else 'disabled'}")
+
     def request_stop(self) -> None:
         self._stop_flag_path.write_text("stop\n", encoding="ascii")
         self.notify("Stop requested")
@@ -175,6 +186,8 @@ def handle_key(actions: InputActions, key: str, move_keys: dict[str, str]) -> bo
         actions.toggle_logging()
     elif key == KEY_TIMINGS:
         actions.toggle_timings()
+    elif key == KEY_VOLTAGE:
+        actions.toggle_voltage()
     elif key == KEY_STOP:
         actions.request_stop()
     elif key == KEY_UP:
@@ -198,6 +211,7 @@ def help_lines(move_keys: dict[str, str]) -> list[str]:
         f"  [{KEY_IMU}]       toggle IMU/gyro display",
         f"  [{KEY_LOG}]       start/stop logging (asks for an optional name)",
         f"  [{KEY_TIMINGS}]       toggle scheduler timing display",
+        f"  [{KEY_VOLTAGE}]       toggle servo voltage + current read (logged when a log is active)",
         "  [arrows]  vx (up/down), vtheta (left/right)",
         f"  [{KEY_RESET_VELOCITY}]       reset velocity to zero",
         f"  [{KEY_STOP}]       stop scheduler",

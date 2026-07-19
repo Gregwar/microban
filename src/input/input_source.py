@@ -16,6 +16,9 @@ class UserInput:
     show_imu: bool = False
     # True while the scheduler should report how long each phase of a tick takes.
     show_timings: bool = False
+    # True while the observer should read present_input_voltage from the servos. Costs an
+    # extra bus transaction per tick, so it is off unless asked for.
+    read_voltage: bool = False
     # True while the scheduler should record a log session; log_name is the optional
     # filename suffix chosen when logging was switched on.
     logging: bool = False

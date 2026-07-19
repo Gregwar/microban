@@ -22,9 +22,7 @@ def main() -> None:
     controller.sync_write_status_return_level(motor_ids, [1] * len(motor_ids))
 
     for motor_id in motor_ids:
-        raw = controller.read_present_input_voltage(motor_id)
-        voltage_raw = raw[0] if isinstance(raw, (list, tuple)) else raw
-        voltage_v = voltage_raw * 0.1
+        voltage_v = controller.read_present_input_voltage(motor_id)
         name = ID_TO_MOTOR.get(motor_id, str(motor_id))
         print(f"  Motor {motor_id:2d}: {voltage_v:.2f} V ({name})")
 

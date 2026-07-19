@@ -24,6 +24,15 @@ from constants import MOTOR_TO_ID, ID_TO_MOTOR, NEUTRAL_POSE, KP_DEFAULT, BAM_VI
 # the contact solver ejects it.
 SPAWN_HEIGHT: float = 0.174
 
+# Window used when velocity is estimated by finite differences instead of read straight
+# from the simulator: v = (q(t) - q(t - dt)) / dt. The XL330 does not measure velocity
+# directly either, so this models the smoothing and lag of the real read.
+VELOCITY_FD_DT: float = 0.030
+
+# Extra solver pass that removes residual tangential drift at contacts. MuJoCo's default
+# is 0 (disabled).
+NOSLIP_ITERATIONS: int = 1
+
 
 class _DelayBuffer:
     """Returns values delayed by n_steps ticks (0 = no delay)."""
@@ -58,11 +67,19 @@ class MuJoCoController:
         delay_gyro_ticks: int = 0,
         delay_quat_ticks: int = 0,
         trunk_com_offset: tuple[float, float, float] = (0.0, 0.0, 0.0),
+        # Estimate joint velocity by finite-differencing position over VELOCITY_FD_DT
+        # instead of reading the simulator's qvel.
+        velocity_finite_difference: bool = False,
     ) -> None:
         self._stop_flag_path = Path(stop_flag_path)
         self._reset_source = reset_source
         self._model = mujoco.MjModel.from_xml_path(mjcf_path)
         self._data = mujoco.MjData(self._model)
+
+        # Noslip is a CPU-only post-pass (MJX has no equivalent), so it lives here rather
+        # than in the MJCF, which is shared with the GPU training setup. One iteration is
+        # enough to stop the feet creeping under contact without softening the solve.
+        self._model.opt.noslip_iterations = NOSLIP_ITERATIONS
 
         self._name_to_actuator_idx: dict[str, int] = {}
         self._name_to_qpos_idx: dict[str, int] = {}
@@ -120,6 +137,15 @@ class MuJoCoController:
             mid: _DelayBuffer(0.0, delay_vel_ticks)
             for mid in MOTOR_TO_ID.values()
         }
+        # Position history backing the finite-difference velocity estimate. Sampled once
+        # per physics step, so the lookback is VELOCITY_FD_DT rounded to a whole number
+        # of steps (exact at the default 2 ms timestep).
+        self._velocity_fd = velocity_finite_difference
+        self._fd_steps = max(1, round(VELOCITY_FD_DT / self._model.opt.timestep))
+        self._fd_dt = self._fd_steps * self._model.opt.timestep
+        self._pos_history: deque = deque(maxlen=self._fd_steps + 1)
+        self._reset_pos_history()
+
         self._delay_gyro = _DelayBuffer((0.0, 0.0, 0.0), delay_gyro_ticks)
         self._delay_quat = _DelayBuffer((1.0, 0.0, 0.0, 0.0), delay_quat_ticks)
         self._delay_act = {
@@ -137,6 +163,24 @@ class MuJoCoController:
         # Sensor indices for IMU readout
         self._sensor_orientation = mujoco.mj_name2id(self._model, mujoco.mjtObj.mjOBJ_SENSOR, "orientation")
         self._sensor_gyro = mujoco.mj_name2id(self._model, mujoco.mjtObj.mjOBJ_SENSOR, "angular-velocity")
+
+    def _joint_positions(self) -> dict[int, float]:
+        """Current joint angles for every motor, keyed by motor id."""
+        return {
+            mid: float(self._data.qpos[self._name_to_qpos_idx[ID_TO_MOTOR[mid]]])
+            for mid in MOTOR_TO_ID.values()
+        }
+
+    def _reset_pos_history(self) -> None:
+        """Fill the whole history with the current pose, so the first differences are zero."""
+        snapshot = self._joint_positions()
+        self._pos_history.clear()
+        for _ in range(self._pos_history.maxlen or 1):
+            self._pos_history.append(snapshot)
+
+    def _finite_difference_velocity(self, motor_id: int) -> float:
+        """Velocity from the position change across the finite-difference window."""
+        return (self._pos_history[-1][motor_id] - self._pos_history[0][motor_id]) / self._fd_dt
 
     def set_kp(self, kp: float) -> None:
         self._bam.model.actuator.kp = kp
@@ -167,6 +211,8 @@ class MuJoCoController:
                 self._bam.set_q_target(ID_TO_MOTOR[motor_id], delayed_pos)
             self._bam.update()
             mujoco.mj_step(self._model, self._data)
+            if self._velocity_fd:
+                self._pos_history.append(self._joint_positions())
 
         if self._reset_source is not None and self._reset_source.consume_reset():
             self.reset()
@@ -195,19 +241,19 @@ class MuJoCoController:
             self._data.qpos[self._name_to_qpos_idx[name]]
         ))
 
+    def _raw_velocity(self, motor_id: int) -> float:
+        if self._velocity_fd:
+            return self._finite_difference_velocity(motor_id)
+        return float(self._data.qvel[self._name_to_qvel_idx[ID_TO_MOTOR[motor_id]]])
+
     def sync_read_present_velocity(self, ids: list[int]) -> list[float]:
         return [
-            self._delay_vel[mid].push_and_read(
-                self._data.qvel[self._name_to_qvel_idx[ID_TO_MOTOR[mid]]]
-            )
+            self._delay_vel[mid].push_and_read(self._raw_velocity(mid))
             for mid in ids
         ]
 
     def read_present_velocity(self, motor_id: int) -> float:
-        name = ID_TO_MOTOR[motor_id]
-        return float(self._delay_vel[motor_id].push_and_read(
-            self._data.qvel[self._name_to_qvel_idx[name]]
-        ))
+        return float(self._delay_vel[motor_id].push_and_read(self._raw_velocity(motor_id)))
 
     def sync_read_present_current(self, ids: list[int]) -> list[float]:
         # Motor current from the torque applied by the bam model: I = torque / kt.
@@ -219,10 +265,11 @@ class MuJoCoController:
         ]
 
     def sync_read_present_input_voltage(self, ids: list[int]) -> list[float]:
-        return [80.0] * len(ids)
+        # Volts, matching what RobotController returns after unit conversion.
+        return [BAM_VIN] * len(ids)
 
     def read_present_input_voltage(self, motor_id: int) -> float:
-        return 80.0
+        return BAM_VIN
 
     def read_acc(self) -> tuple[float, float, float]:
         """Return pseudo-accelerometer (ax, ay, az) in g from the 'orientation' sensor."""
@@ -281,4 +328,5 @@ class MuJoCoController:
             self._delay_vel[mid].fill(0.0)
         self._delay_gyro.fill((0.0, 0.0, 0.0))
         self._delay_quat.fill((1.0, 0.0, 0.0, 0.0))
+        self._reset_pos_history()
         self._viewer.sync()
