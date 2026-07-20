@@ -14,6 +14,7 @@ from moves.benchmark import BenchmarkMove
 from moves.rotate_head import RotateHeadMove
 from moves.squat import SquatMove
 from moves.squat_rl import SquatRlMove
+from moves.getup import GetupMove
 from moves.walk import WalkMove
 
 PID_FILE = Path("/tmp/microban_scheduler.pid")
@@ -77,6 +78,7 @@ def main() -> None:
                 "benchmark": BenchmarkMove(),
                 "squat": SquatMove(),
                 "squat_rl": SquatRlMove(controller=controller),
+                "getup": GetupMove(controller=controller),
                 "walk": WalkMove(controller=controller),
             },
         )

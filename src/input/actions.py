@@ -16,7 +16,7 @@ import os
 import threading
 from pathlib import Path
 
-from input.input_source import InputSource, UserInput
+from input.input_source import InputSource, UserInput, scale_velocity
 
 STOP_FLAG_PATH = "/tmp/microban_scheduler.stop"
 
@@ -25,7 +25,9 @@ VELOCITY_MAX = 1.0
 
 # Which moves can be toggled, and what toggles them. Single source of truth: change a
 # binding here and both the robot and the simulation follow.
-MOVE_KEYS = {"h": "head", "s": "squat", "v": "walk", "z": "squat_rl", "b": "benchmark"}
+MOVE_KEYS = {
+    "h": "head", "s": "squat", "v": "walk", "z": "squat_rl", "g": "getup", "b": "benchmark",
+}
 GAMEPAD_BUTTON_MOVES = {"A": "walk"}
 
 # Normalized key names.
@@ -93,7 +95,11 @@ class InputActions(InputSource):
             velocity = self._state.velocity
             velocity[axis] = max(-VELOCITY_MAX, min(VELOCITY_MAX, velocity.get(axis, 0.0) + delta))
             value = velocity[axis]
-        self.notify(f"{axis}={value:.1f}")
+            # Scaled here rather than read back from the scheduler: the same function runs
+            # there, so what is printed is exactly what the policy will get.
+            scaled = scale_velocity(velocity)
+        commands = ", ".join(f"{name}={scaled[name]:.3f}" for name in ("vx", "vy", "vtheta"))
+        self.notify(f"{axis}={value:.1f}  / commands: {commands}")
 
     def set_velocity(self, axis: str, norm: float) -> None:
         """Set a normalized axis command outright (analog sticks); scale_velocity()
