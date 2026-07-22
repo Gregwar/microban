@@ -33,6 +33,10 @@ class BenchmarkMove(Move):
     at an edge is the total loop delay; the rise time after it is the joint's own response.
     """
 
+    # Not a policy, but stamped like one: comparing two benchmark runs is only meaningful
+    # once they are lined up on the move start rather than on the moment [l] was hit.
+    is_policy = True
+
     def __init__(self) -> None:
         super().__init__()
         self._lerp_start_time_s: float | None = None
