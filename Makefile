@@ -12,6 +12,7 @@ sync:
 		--exclude='cad' \
 		--exclude='docs' \
 		--exclude='logs' \
+		--exclude='old_logs' \
 		--exclude='sd_card' \
 		--exclude='src/debug' \
 		--exclude='src/sim' \
@@ -21,8 +22,22 @@ sync:
 setup: sync
 	ssh $(HOST) "bash -l -c 'cd microban && uv sync --frozen'"
 
+# Extra flags for `sim`, either after a `--` separator or via ARGS=:
+#   make sim -- --fd-velocity --delay-act 10
+#   make ARGS="--fd-velocity" sim
+# Everything after `--` reaches make as extra goals, so they are collected here and
+# given a no-op rule below (otherwise make would try to build `--fd-velocity`).
+# Use the spaced form `--delay-act 10`, not `--delay-act=10`: make reads a command-line
+# word containing `=` as a variable assignment, so it never arrives as a goal.
+ifneq ($(filter sim,$(MAKECMDGOALS)),)
+SIM_EXTRA := $(filter-out sim,$(MAKECMDGOALS))
+ifneq ($(SIM_EXTRA),)
+$(eval $(SIM_EXTRA):;@:)
+endif
+endif
+
 sim:
-	PYTHONPATH=src uv run --group sim src/sim/sim_main.py --hz 50
+	PYTHONPATH=src uv run --group sim src/sim/sim_main.py --hz 50 $(SIM_EXTRA) $(ARGS)
 
 viewer:
 	PYTHONPATH=src uv run src/sim/viewer_main.py --hz 25
