@@ -324,6 +324,11 @@ http://www.apache.org/licenses/LICENSE-2.0
                   <!-- Part stp39__configuration__2x6_64 -->
                   <!-- Frame right_foot -->
                   <site group="3" name="right_foot" pos="-0 -0.023 0.042" quat="0.5 -0.5 -0.5 -0.5"/>
+                  <!-- Sole corners (in right_foot frame: x forward, y left, z up) -->
+                  <site group="3" name="right_foot_front_left" pos="0.0225 -0.023 0.082" quat="0.5 -0.5 -0.5 -0.5"/>
+                  <site group="3" name="right_foot_front_right" pos="-0.0225 -0.023 0.082" quat="0.5 -0.5 -0.5 -0.5"/>
+                  <site group="3" name="right_foot_back_left" pos="0.0225 -0.023 0.002" quat="0.5 -0.5 -0.5 -0.5"/>
+                  <site group="3" name="right_foot_back_right" pos="-0.0225 -0.023 0.002" quat="0.5 -0.5 -0.5 -0.5"/>
                 </body>
               </body>
             </body>
@@ -533,6 +538,11 @@ http://www.apache.org/licenses/LICENSE-2.0
                   <!-- Part stp39__configuration__2x6_124 -->
                   <!-- Frame left_foot -->
                   <site group="3" name="left_foot" pos="-0 -0.023 0.042" quat="0.5 -0.5 -0.5 -0.5"/>
+                  <!-- Sole corners (in left_foot frame: x forward, y left, z up) -->
+                  <site group="3" name="left_foot_front_left" pos="0.0225 -0.023 0.082" quat="0.5 -0.5 -0.5 -0.5"/>
+                  <site group="3" name="left_foot_front_right" pos="-0.0225 -0.023 0.082" quat="0.5 -0.5 -0.5 -0.5"/>
+                  <site group="3" name="left_foot_back_left" pos="0.0225 -0.023 0.002" quat="0.5 -0.5 -0.5 -0.5"/>
+                  <site group="3" name="left_foot_back_right" pos="-0.0225 -0.023 0.002" quat="0.5 -0.5 -0.5 -0.5"/>
                 </body>
               </body>
             </body>
