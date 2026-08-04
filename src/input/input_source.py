@@ -19,6 +19,9 @@ class UserInput:
     # True while the observer should read present_input_voltage from the servos. Costs an
     # extra bus transaction per tick, so it is off unless asked for.
     read_voltage: bool = False
+    # One-shot, unlike the toggles above: True for exactly one tick, on the tick after [?]
+    # was pressed, asking the scheduler to print which policy each move is running.
+    show_agents: bool = False
     # True while the scheduler should record a log session; log_name is the optional
     # filename suffix chosen when logging was switched on.
     logging: bool = False

@@ -179,6 +179,9 @@ class Scheduler:
                     },
                 )
 
+                if obs.user_input.show_agents:
+                    self._print_agents()
+
                 # IMU / gyro terminal display
                 if obs.user_input.show_imu and (start_time - self._last_imu_print_s) >= 0.5:
                     acc = obs.robot_state.acc
@@ -263,6 +266,23 @@ class Scheduler:
         self._timings.clear()
         self._timing_overruns = 0
         self._last_timing_print_s = now
+
+    def _print_agents(self) -> None:
+        """Answer [?]: which policy is behind each policy move.
+
+        Printed from here because the scheduler is what holds the moves, and the run name
+        is read off the ONNX session each one loaded — so this reports the policy actually
+        in memory, not what a constant in the source says it should be.
+        """
+        policies = {name: move for name, move in self.registered_moves.items() if move.is_policy}
+        print("--------------------------------------------", end="\r\n", flush=True)
+        if not policies:
+            print("No policy moves registered", end="\r\n", flush=True)
+            return
+        print(f"Policy moves ({len(policies)}):", end="\r\n", flush=True)
+        for name, move in policies.items():
+            active = " [active]" if move.state != MoveState.INACTIVE else ""
+            print(f"  {name:<10} {move.describe() or '<no policy information>'}{active}", end="\r\n", flush=True)
 
     def _print_bus_stats(self) -> None:
         """Report bus traffic and communication faults, session-cumulative.

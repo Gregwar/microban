@@ -8,10 +8,10 @@ import onnxruntime as ort
 from constants import MOTOR_TO_ID, KP_DEFAULT, KP_RL, OBSERVATION_DOF_ORDER
 from controller import ControllerProtocol
 from observer import Observation
-from moves.move import MotorCommand, Move, MoveState
+from moves.move import MotorCommand, Move, MoveState, onnx_run_name
 
 # Policy name
-AGENT_NAME = "squat_m6.onnx"
+AGENT_NAME = "squat.onnx"
 
 # Squat trajectory. The policy tracks a trunk-height target; this move plays that target
 # as the same sine the training command did (mjlab SquatHeightCommand):
@@ -59,6 +59,9 @@ class SquatRlMove(Move):
 
         # Safety parameters
         self._projected_gravity_z_threshold = -0.5  # Threshold for detecting a fall based on projected gravity
+
+    def describe(self) -> str:
+        return onnx_run_name(self._ort_session, AGENT_NAME)
 
     def on_start(self, obs: Observation, command: MotorCommand) -> None:
         if self._controller is not None:

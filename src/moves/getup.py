@@ -3,44 +3,38 @@
 
 import onnxruntime as ort
 
-from constants import MOTOR_TO_ID, KP_DEFAULT, KP_RL
+from constants import MOTOR_TO_ID, KP_DEFAULT, KP_RL, OBSERVATION_DOF_ORDER
 from controller import ControllerProtocol
 from observer import Observation
-from moves.move import MotorCommand, Move, MoveState
+from moves.move import MotorCommand, Move, MoveState, onnx_run_name
 
 # Policy name
 AGENT_NAME = "getup.onnx"
+
+# The policy tracks a trunk-height target, the same command term the squat policy uses.
+# Getting up is that command pinned high and held: the training config sampled it from
+# (0.165, 0.165) with zero amplitude and zero frequency, so unlike the squat there is no
+# trajectory to play — just a constant "stand up" target.
+#
+# This one is not a tuning knob. The command channel was constant throughout training, so
+# its observation normalizer has a degenerate standard deviation (the variance floor).
+# Any departure from the trained value is divided by that floor and reaches the network
+# as a wildly out-of-distribution input.
+STAND_HEIGHT = 0.165  # metres, target trunk height
 
 
 class GetupMove(Move):
     """Get back on its feet from any fallen pose, using an RL policy trained in simulation.
 
-    Environment: mjlab_microban/tasks/microban_getup_env_cfg.py, a fall-recovery task
-    ported from mjlab_playground. Observation layout is
-    gyro(3) + projected gravity(3) + joint_pos(19) + joint_vel(19) + last action(19) = 63,
-    and there are 19 actions, one per joint including the head.
+    Environment: mjlab_microban/tasks/microban_getup_env_cfg.py. The observation layout is
+    the squat one — gyro(3) + projected gravity(3) + joint_pos(18) + joint_vel(18) +
+    last action(18) + height target(1) = 61 — and the 18 actions are joint offsets from the
+    reference pose for every joint except the head, which this move leaves at neutral.
 
-    Two things differ from the squat-derived policies and from this move's own earlier
-    version, and both matter for deployment:
-
-    - There is no command channel. The previous getup env reused the squat's trunk-height
-      command pinned to a constant; this one has ``commands={}``. Difficulty comes from the
-      reset (dropped from height at a random orientation) and an energy-termination
-      curriculum instead, so there is nothing left to feed the network beyond state.
-
-    - The action term is RELATIVE, not an offset from the reference pose. Training used
-      SettleRelativeJointPositionActionCfg with scale 0.6, which drives
-      ``target = measured joint position + action * scale`` every step. Adding the action
-      to the default pose instead — what an absolute policy wants — would make the targets
-      mean something entirely different to the robot.
-
-    The joint set and its ordering come from the ONNX metadata rather than
-    OBSERVATION_DOF_ORDER: that constant lists 18 joints in a different order and omits the
-    head, which this policy both observes and drives.
-
-    Training started the robot dropped at a random orientation, so the policy expects to be
-    handed an arbitrary pose. It has no notion of being finished: once upright it keeps
-    balancing, so the move stays ACTIVE until untoggled rather than stopping itself.
+    Training started the robot prone, supine or standing, at a random yaw and with the
+    trunk on the floor, so the policy expects to be handed an arbitrary orientation. It has
+    no notion of being finished: once upright it keeps balancing, so the move stays ACTIVE
+    until untoggled rather than stopping itself.
     """
 
     is_policy = True
@@ -48,31 +42,29 @@ class GetupMove(Move):
     def __init__(self, controller: ControllerProtocol | None = None) -> None:
         super().__init__()
         self._controller = controller
+        self._last_action = [0.0] * len(OBSERVATION_DOF_ORDER)
 
         # Load ONNX policy
         self._ort_session = ort.InferenceSession(f"src/agents/{AGENT_NAME}")
 
-        # Joint order, reference pose and action scale: read from ONNX metadata, so the
-        # deployed layout tracks whatever the export produced instead of a hand-kept copy.
-        meta = self._ort_session.get_modelmeta().custom_metadata_map
-        self._joint_names = meta["joint_names"].split(",")
-        positions = [float(v) for v in meta["default_joint_pos"].split(",")]
-        self._default_pose: dict[str, float] = dict(zip(self._joint_names, positions))
-        self.action_scale = float(meta["action_scale"])
+        self.action_scale = 1.0
 
-        self._last_action = [0.0] * len(self._joint_names)
+        # Reference pose: read from ONNX metadata
+        meta = self._ort_session.get_modelmeta().custom_metadata_map
+        names = meta["joint_names"].split(",")
+        positions = [float(v) for v in meta["default_joint_pos"].split(",")]
+        self._default_pose: dict[str, float] = dict(zip(names, positions))
+
+    def describe(self) -> str:
+        return onnx_run_name(self._ort_session, AGENT_NAME)
 
     def on_start(self, obs: Observation, command: MotorCommand) -> None:
         if self._controller is not None:
             ids = list(MOTOR_TO_ID.values())
             self._controller.sync_write_kp(ids, [KP_RL] * len(ids))
-        self._last_action = [0.0] * len(self._joint_names)
+        self._last_action = [0.0] * len(OBSERVATION_DOF_ORDER)
         # Straight to ACTIVE, with no ramp to a start pose: the robot is on the ground and
         # lerping it through neutral on the way in would drive limbs into the floor.
-        #
-        # The env's 25-step settle window is not replayed here either. It exists so a robot
-        # dropped in simulation lands before the policy takes over; a real robot that has
-        # already fallen is settled by the time anyone toggles this move.
         self.state = MoveState.ACTIVE
 
     def step(self, obs: Observation, command: MotorCommand) -> None:
@@ -94,11 +86,9 @@ class GetupMove(Move):
         action = ort_outs[0][0]
         self._last_action = action.tolist()
 
-        # Update command. Relative action: the target is an increment on the position the
-        # joint is measured at now, so each tick moves from wherever the robot actually is.
-        for i, name in enumerate(self._joint_names):
-            measured = obs.robot_state.motor_positions[name]
-            command.target_angles[name] = measured + action[i] * self.action_scale
+        # Update command
+        for i, name in enumerate(OBSERVATION_DOF_ORDER):
+            command.target_angles[name] = self._default_pose[name] + action[i] * self.action_scale
 
     def build_observation(self, obs: Observation) -> list[float]:
         """Build policy observation from robot state."""
@@ -108,16 +98,19 @@ class GetupMove(Move):
         input_obs.extend(obs.robot_state.gyro)
         input_obs.extend(obs.robot_state.projected_gravity)
 
-        # Motor positions, relative to the reference pose
-        for name in self._joint_names:
+        # Motor positions
+        for name in OBSERVATION_DOF_ORDER:
             input_obs.append(obs.robot_state.motor_positions[name] - self._default_pose[name])
 
         # Motor velocities
-        for name in self._joint_names:
+        for name in OBSERVATION_DOF_ORDER:
             input_obs.append(obs.robot_state.motor_velocities[name])
 
         # Last action
         input_obs.extend(self._last_action)
+
+        # Command: the trunk height target, held at the standing value
+        input_obs.append(STAND_HEIGHT)
 
         return input_obs
 

@@ -16,13 +16,22 @@ Comparing exactly two policy-aligned logs also offers an `MAE` trace: the positi
 between the runs, averaged over the joints and then averaged over time from t=2.5 s
 onwards (before that the robot is still settling into the gait, so the curve is held at 0).
 
+`--odometry` replays the log through the placo estimator in src/odometry.py and adds where
+the robot went — trunk position, heading, and body-frame linear velocity — as traces of
+their own. `--view` replays it in the MuJoCo viewer instead of plotting, on a loop, with
+the floating base placed by that same odometry.
+
     uv run --group debug src/debug/plot_log.py                    # newest log in logs/
     uv run --group debug src/debug/plot_log.py logs/a.json
     uv run --group debug src/debug/plot_log.py logs/a.json logs/b.json logs/c.json
+    uv run --group debug src/debug/plot_log.py logs/a.json --odometry
+    uv run --group debug --group sim src/debug/plot_log.py logs/a.json --view
 """
 
+import sys
 import json
 import math
+import time
 import bisect
 import argparse
 from pathlib import Path
@@ -32,7 +41,15 @@ import matplotlib.pyplot as plt
 from matplotlib.gridspec import GridSpec
 from matplotlib.widgets import CheckButtons
 
+# src/odometry.py and the constants it needs live one directory up; this script is run by
+# path (`uv run src/debug/plot_log.py`), so nothing else puts src/ on the import path.
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
 LOG_DIR = "logs"
+
+# Scene rather than the bare robot: --view wants the floor and lights to judge the replay
+# against. The odometry itself loads the robot alone (odometry.DEFAULT_MODEL_PATH).
+SCENE_PATH = "src/model/mjcf/scene.xml"
 
 # Single log: goal is dashed black over a blue read. Comparing several, each log takes a
 # colour of its own instead, keeping dashed=goal / solid=read.
@@ -48,6 +65,48 @@ IMU_UNITS = {
     "gyro y": "rad/s",
     "gyro z": "rad/s",
 }
+
+# Odometry traces, offered only with --odometry since computing them means replaying the
+# whole log through placo. They ride on the odometry's own finer time grid rather than the
+# log's ticks. Position and heading are dead reckoned and drift; the velocities are
+# instantaneous estimates and are as noisy as the joint velocity reads feeding them.
+ODOMETRY_UNITS = {
+    "odom x": "m",
+    "odom y": "m",
+    "odom z": "m",
+    "odom yaw": "deg",
+    "body vx": "m/s",
+    "body vy": "m/s",
+    # The trunk yaw rate, with the IMU mount rotation taken out. The raw `gyro y` channel
+    # above is the *negative* of this one (see odometry.gyro_to_trunk), so this is the axis
+    # to read a turn off without having to remember the sign.
+    "body vyaw": "rad/s",
+}
+
+# Velocity traces are per-tick estimates riding on noisy servo velocity reads, and they
+# swing hard within every stride. The dashed overlay is what you read a sustained walking
+# speed or a steady turn rate off; the raw trace is what you read the stride structure off.
+EMA_TRACES = frozenset({"body vx", "body vy", "body vyaw"})
+
+# The velocity target handed to the policy, logged by the scheduler in physical units
+# (src/robot_logger.py "command", scaled by scale_velocity before both the policy and the
+# log see it). Overlaid on the odometry trace of the same axis, so what the robot was asked
+# for and what it actually did read off one pair of curves. Note `vtheta` pairs with the
+# yaw *rate*, which is why `body vyaw` replaced `body vz` here.
+COMMAND_AXIS = {"body vx": "vx", "body vy": "vy", "body vyaw": "vtheta"}
+
+# Black in both solo and comparison figures: the command is the target being tracked, not
+# one more per-log measurement, so it should not take a log's colour. Solid, to stay
+# distinct from the dashed EMA sharing the same axes.
+COMMAND_STYLE = {"color": "black", "linewidth": 1.2}
+
+# Time constant for that overlay. At 0.75 s it spans a stride or two — long enough to
+# average the within-stride swing away, short enough to still follow a change of command.
+VELOCITY_EMA_TAU_S = 0.75
+
+# Everything plotted full width, with no goal/read pair: one label -> unit lookup for all
+# of them, so they share a single rendering path.
+TRACE_UNITS = {**IMU_UNITS, **ODOMETRY_UNITS}
 
 # Servo telemetry recorded only while [u] was on during the run. Each channel gets a column
 # on every ticked joint plus a full-width aggregate row: the motors share one supply, so the
@@ -149,6 +208,112 @@ def imu_channels(log: dict) -> dict[str, list[float]]:
             out[f"gyro {axis}"] = series(gyro[axis])
 
     return out
+
+
+def odometry_samples(log: dict) -> list:
+    """Replay `log` through the placo odometry (see src/odometry.py).
+
+    The samples come back on the odometry's own finer grid, not on the log's ticks — the
+    log is interpolated up to ODOMETRY_DT first — so they carry their own timestamps.
+
+    Imported lazily: placo pulls in pinocchio and takes a moment to load the model, and a
+    plain plotting run has no use for either.
+    """
+    from odometry import replay_log
+
+    return replay_log(log)
+
+
+def _unwrap_degrees(angles: list[float]) -> list[float]:
+    """Remove the +-180 deg wraps, so a turn reads as a continuous curve.
+
+    Heading is dead reckoned and unbounded — a robot that turns twice really is at 720 deg
+    — but atan2 folds it back into a half turn, putting a vertical jump in the plot exactly
+    where nothing happened.
+    """
+    out: list[float] = []
+    offset = 0.0
+    previous: float | None = None
+    for angle in angles:
+        if previous is not None:
+            delta = angle - previous
+            if delta > 180.0:
+                offset -= 360.0
+            elif delta < -180.0:
+                offset += 360.0
+        previous = angle
+        out.append(angle + offset)
+    return out
+
+
+def odometry_channels(samples: list) -> dict[str, list[float]]:
+    """Odometry traces, keyed by the label shown on its checkbox."""
+    return {
+        "odom x": [float(s.position[0]) for s in samples],
+        "odom y": [float(s.position[1]) for s in samples],
+        "odom z": [float(s.position[2]) for s in samples],
+        "odom yaw": _unwrap_degrees([math.degrees(s.yaw) for s in samples]),
+        "body vx": [float(s.body_velocity[0]) for s in samples],
+        "body vy": [float(s.body_velocity[1]) for s in samples],
+        "body vyaw": [float(s.omega_trunk[2]) for s in samples],
+    }
+
+
+def view_replay(samples: list, scene_path: str = SCENE_PATH) -> None:
+    """Loop the log in the MuJoCo viewer, with the base placed by the odometry.
+
+    Purely kinematic: the joints are written straight from the recorded readback and the
+    free base from the estimated trunk pose, then only forward kinematics is run. Nothing
+    is simulated, so this shows what the estimator believes happened — including the feet
+    sinking into or floating above the floor wherever it believes wrong.
+
+    Runs on the odometry's own interpolated grid, so the playback is smoother than the
+    50 Hz the log was recorded at. Time still comes from the log's clock, and the replay
+    restarts from the top until the viewer window is closed.
+    """
+    import mujoco
+    import mujoco.viewer
+
+    from constants import MOTOR_TO_ID
+    from odometry import matrix_to_quat
+
+    model = mujoco.MjModel.from_xml_path(scene_path)
+    data = mujoco.MjData(model)
+
+    qpos_adr = {}
+    for name in MOTOR_TO_ID:
+        joint_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_JOINT, name)
+        if joint_id >= 0:
+            qpos_adr[name] = model.jnt_qposadr[joint_id]
+
+    print(f"Replaying {len(samples)} ticks in the viewer — close the window to stop.")
+    with mujoco.viewer.launch_passive(model, data) as viewer:
+        while viewer.is_running():
+            wall_start = time.perf_counter()
+            for i, sample in enumerate(samples):
+                if not viewer.is_running():
+                    break
+
+                T = sample.T_world_trunk
+                data.qpos[0:3] = T[:3, 3]
+                data.qpos[3:7] = matrix_to_quat(T[:3, :3])
+                for name, adr in qpos_adr.items():
+                    data.qpos[adr] = sample.joints.get(name, 0.0)
+
+                mujoco.mj_forward(model, data)
+                viewer.sync()
+
+                # Hold this frame until the next one is due. The deadline is absolute —
+                # measured from wall_start, not from the previous frame — and `now` is
+                # read after the forward kinematics and the sync, so the tick's own cost
+                # comes out of the sleep and a slow frame does not push the ones after it
+                # late. A frame that overruns simply does not sleep.
+                if i + 1 < len(samples):
+                    sleep_s = (
+                        wall_start + (samples[i + 1].t - samples[0].t) - time.perf_counter()
+                    )
+                    if sleep_s > 0.0:
+                        time.sleep(sleep_s)
 
 
 def channel_stats(
@@ -295,16 +460,15 @@ def common_joints(logs: list[dict]) -> list[str]:
     return shared
 
 
-def build_figure(entries: list[tuple[Path, dict]]):
+def build_figure(entries: list[tuple[Path, dict]], odometry: list[list] | None = None):
     """Build the figure from (path, log) pairs. Returns (fig, check) — the caller must
-    hold on to `check`, since a garbage-collected matplotlib widget stops responding."""
+    hold on to `check`, since a garbage-collected matplotlib widget stops responding.
+
+    `odometry` holds the replayed samples per log (see odometry_samples), or None when
+    --odometry was not asked for."""
     logs = [log for _, log in entries]
     joints = common_joints(logs)
     solo = len(entries) == 1
-
-    # Only offer an IMU trace when every log has it, so a comparison is always like-for-like.
-    imu = [imu_channels(log) for log in logs]
-    imu_labels = [label for label in IMU_UNITS if all(label in channels for channels in imu)]
 
     # Same rule as the IMU traces: only offered when every log has it. Each available
     # channel becomes both a per-joint column and a full-width aggregate row.
@@ -317,16 +481,31 @@ def build_figure(entries: list[tuple[Path, dict]]):
     # Align on the policy start only when every log can be — a partial alignment would
     # silently compare runs against different origins.
     aligned = all(policy_t0(log) is not None for log in logs)
-    times = [
-        [t - (policy_t0(log) if aligned else 0.0) for t in log["time"]]
-        for log in logs
-    ]
+    offsets = [(policy_t0(log) if aligned else 0.0) for log in logs]
+    times = [[t - offset for t in log["time"]] for log, offset in zip(logs, offsets)]
+
+    # Full-width traces: the IMU channels, plus the odometry ones when they were computed.
+    # Only offered when every log has them, so a comparison is always like-for-like.
+    #
+    # The odometry is replayed on its own finer grid (odometry.ODOMETRY_DT), so it does not
+    # share the log's tick times and carries an x axis of its own. `trace_times` holds that
+    # override; anything absent from it is sampled at the log's own ticks.
+    traces = [imu_channels(log) for log in logs]
+    trace_times: list[dict[str, list[float]]] = [{} for _ in logs]
+    if odometry is not None:
+        for i, samples in enumerate(odometry):
+            channels = odometry_channels(samples)
+            traces[i] |= channels
+            trace_times[i] |= {
+                label: [s.t - offsets[i] for s in samples] for label in channels
+            }
+    trace_labels = [label for label in TRACE_UNITS if all(label in ch for ch in traces)]
 
     # Comparing the two runs against each other only makes sense once they share an origin,
     # so the MAE row rides on the same policy alignment as the rest of the figure.
     mae = cumulative_mae(times, logs, joints) if len(entries) == 2 and aligned else None
 
-    labels = joints + imu_labels + telemetry_labels + ([MAE_LABEL] if mae else [])
+    labels = joints + trace_labels + telemetry_labels + ([MAE_LABEL] if mae else [])
 
     # A ticked joint gets position, velocity, then one column per recorded channel.
     ncols = 2 + len(telemetry)
@@ -472,14 +651,45 @@ def build_figure(entries: list[tuple[Path, dict]]):
                         loc="upper left", fontsize=8,
                     )
                 else:
-                    # IMU traces have no goal/read pair, so they take the full width.
+                    # IMU and odometry traces have no goal/read pair, so they take the
+                    # full width.
                     ax = fig.add_subplot(grid[row, :], sharex=shared)
                     shared = shared or ax
                     row_axes = [ax]
 
-                    for i, _ in enumerate(entries):
-                        ax.plot(times[i], imu[i][label], **read_style(i))
-                    ax.set_ylabel(f"{label} ({IMU_UNITS[label]})", fontsize=9)
+                    smoothed = label in EMA_TRACES
+                    command_axis = COMMAND_AXIS.get(label)
+                    commanded = False
+
+                    for i, (_, log) in enumerate(entries):
+                        x = trace_times[i].get(label, times[i])
+                        ax.plot(x, traces[i][label], **read_style(i))
+                        if smoothed:
+                            ax.plot(
+                                x, ema(x, traces[i][label], VELOCITY_EMA_TAU_S),
+                                color=colors[i], linestyle="--", linewidth=1.6,
+                            )
+                        # The command was recorded per control tick, so it rides on the
+                        # log's own time axis rather than the odometry's finer grid. Logs
+                        # predating the channel simply get no overlay.
+                        values = (log.get("command") or {}).get(command_axis) if command_axis else None
+                        if values:
+                            ax.plot(times[i], series(values), **COMMAND_STYLE)
+                            commanded = True
+
+                    ax.set_ylabel(f"{label} ({TRACE_UNITS[label]})", fontsize=9)
+                    if smoothed:
+                        handles = [
+                            plt.Line2D([], [], color=colors[0], linewidth=1.0),
+                            plt.Line2D([], [], color=colors[0], linestyle="--", linewidth=1.6),
+                        ]
+                        legend_names = ["per tick", f"EMA ({VELOCITY_EMA_TAU_S:g} s)"]
+                        if commanded:
+                            handles.append(plt.Line2D([], [], **COMMAND_STYLE))
+                            legend_names.append("command")
+                        ax.legend(
+                            handles=handles, labels=legend_names, loc="upper right", fontsize=8
+                        )
 
                 axes.extend(row_axes)
 
@@ -489,9 +699,10 @@ def build_figure(entries: list[tuple[Path, dict]]):
                     if aligned and not solo:
                         ax.axvline(0.0, color="0.6", linewidth=0.8, zorder=0)
 
-                # The MAE row carries its own legend — a per-log one would be meaningless
-                # there, and would replace it.
-                if row == 0 and label != MAE_LABEL:
+                # The MAE row and the EMA-overlaid velocity rows carry legends of their own,
+                # which a per-log one would silently replace (a matplotlib axis holds one).
+                # On those rows the log colours are still readable from the joint rows.
+                if row == 0 and label != MAE_LABEL and label not in EMA_TRACES:
                     first = row_axes[0]
                     if solo and is_joint:
                         handles = [plt.Line2D([], [], **goal_style(0)), plt.Line2D([], [], **read_style(0))]
@@ -523,6 +734,18 @@ def main() -> None:
     parser.add_argument(
         "logs", nargs="*", type=Path, help=f"log files to overlay (default: newest in {LOG_DIR}/)"
     )
+    parser.add_argument(
+        "--odometry",
+        action="store_true",
+        help="replay the logs through the placo odometry and offer its traces "
+        "(trunk position and heading, body linear velocity)",
+    )
+    parser.add_argument(
+        "--view",
+        action="store_true",
+        help="replay in the MuJoCo viewer on a loop instead of plotting, with the floating "
+        "base placed by the odometry (needs --group sim)",
+    )
     args = parser.parse_args()
 
     paths = args.logs or [latest_log()]
@@ -539,7 +762,29 @@ def main() -> None:
         if not all(channel_stats(log, tel.key) is not None for _, log in entries):
             print(f"No {tel.label} in these logs — press [u] during a run to record it.")
 
-    fig, check = build_figure(entries)  # `check` must stay referenced while the window is open
+    # The viewer replays one run, so it takes the first log and ignores the rest — there is
+    # only one robot in the scene to move.
+    if args.view and len(entries) > 1:
+        print(f"--view replays one log; showing {entries[0][0].name} and ignoring the rest.")
+
+    odometry = None
+    if args.odometry or args.view:
+        try:
+            print("Computing odometry...")
+            odometry = [odometry_samples(log) for _, log in entries]
+        except Exception as error:
+            # Without the estimate --view has nothing to show, but the plots stand alone,
+            # so only the viewer treats this as fatal.
+            if args.view:
+                raise SystemExit(f"Odometry failed: {error}")
+            print(f"Odometry unavailable ({error}) — plotting without it.")
+
+    if args.view:
+        view_replay(odometry[0])
+        return
+
+    # `check` must stay referenced while the window is open
+    fig, check = build_figure(entries, odometry)
     plt.show()
 
 

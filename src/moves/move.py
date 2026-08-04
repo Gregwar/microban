@@ -9,6 +9,21 @@ from observer import Observation
 from constants import NEUTRAL_POSE
 
 
+def onnx_run_name(session, agent_name: str) -> str:
+    """`agent_name` plus the training run it was exported from, for the [?] report.
+
+    The training side stamps the run into the ONNX metadata as `run_path`, e.g.
+    2026-08-01_23-35-56_vel_m1_4trajdelay_15k. Policy files get renamed and copied
+    between machines (src/agents holds a dozen `squat_*.onnx`), so that stamp — not the
+    filename — is what says which training run is actually driving the robot.
+    """
+    try:
+        run = session.get_modelmeta().custom_metadata_map.get("run_path")
+    except Exception as exc:  # a policy that runs but whose metadata is odd must still report
+        run = f"<metadata unreadable: {exc}>"
+    return f"{agent_name:<18} {run or '<no run_path in metadata>'}"
+
+
 class MoveState(Enum):
     INACTIVE = auto()
     STARTING = auto()
@@ -39,6 +54,14 @@ class Move(ABC):
 
     def preload(self) -> None:
         """Called before the control loop starts. Override to load heavy resources."""
+
+    def describe(self) -> str | None:
+        """One line saying what this move actually runs, printed by [?].
+
+        Policy moves return their ONNX and the training run behind it (onnx_run_name);
+        None means there is nothing to report and the move is listed as unknown.
+        """
+        return None
 
     def on_start(self, obs: Observation, command: MotorCommand) -> None:
         """Called each tick while state is STARTING.

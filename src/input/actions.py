@@ -45,6 +45,9 @@ KEY_TIMINGS = "p"
 # [v] is taken by the walk move; [u] is the usual symbol for voltage anyway. Also
 # turns on the current read, which the widened bus block brings back alongside it.
 KEY_VOLTAGE = "u"
+# Which policy each move is running. A question about the loaded state, not a toggle:
+# it prints once per press.
+KEY_AGENTS = "?"
 
 
 class InputActions(InputSource):
@@ -63,15 +66,20 @@ class InputActions(InputSource):
 
     def read(self) -> UserInput:
         with self._lock:
-            return UserInput(
+            snapshot = UserInput(
                 active_moves=set(self._state.active_moves),
                 velocity=dict(self._state.velocity),
                 show_imu=self._state.show_imu,
                 show_timings=self._state.show_timings,
                 read_voltage=self._state.read_voltage,
+                show_agents=self._state.show_agents,
                 logging=self._state.logging,
                 log_name=self._state.log_name,
             )
+            # One-shot: hand the pending [?] request to this tick and clear it, so the
+            # scheduler prints the report once instead of every tick until pressed again.
+            self._state.show_agents = False
+        return snapshot
 
     def notify(self, message: str) -> None:
         print(message, end=self._line_ending, flush=True)
@@ -137,6 +145,15 @@ class InputActions(InputSource):
             read = self._state.read_voltage
         self.notify(f"Voltage + current read {'enabled' if read else 'disabled'}")
 
+    def show_agents(self) -> None:
+        """Ask the scheduler to print the policy behind each move (it owns the moves).
+
+        Nothing is printed here: the answer is read off the loaded ONNX sessions, which
+        only the scheduler holds.
+        """
+        with self._lock:
+            self._state.show_agents = True
+
     def request_stop(self) -> None:
         self._stop_flag_path.write_text("stop\n", encoding="ascii")
         self.notify("Stop requested")
@@ -194,6 +211,8 @@ def handle_key(actions: InputActions, key: str, move_keys: dict[str, str]) -> bo
         actions.toggle_timings()
     elif key == KEY_VOLTAGE:
         actions.toggle_voltage()
+    elif key == KEY_AGENTS:
+        actions.show_agents()
     elif key == KEY_STOP:
         actions.request_stop()
     elif key == KEY_UP:
@@ -218,6 +237,7 @@ def help_lines(move_keys: dict[str, str]) -> list[str]:
         f"  [{KEY_LOG}]       start/stop logging (asks for an optional name)",
         f"  [{KEY_TIMINGS}]       toggle scheduler timing display",
         f"  [{KEY_VOLTAGE}]       toggle servo voltage + current read (logged when a log is active)",
+        f"  [{KEY_AGENTS}]       show the ONNX and training run behind each policy move",
         "  [arrows]  vx (up/down), vtheta (left/right)",
         f"  [{KEY_RESET_VELOCITY}]       reset velocity to zero",
         f"  [{KEY_STOP}]       stop scheduler",

@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING
 
 import mujoco
 import mujoco.viewer
+import numpy as np
 
 if TYPE_CHECKING:
     from sim.debug_keys import SimDebugKeys
@@ -27,7 +28,7 @@ SPAWN_HEIGHT: float = 0.174
 # Window used when velocity is estimated by finite differences instead of read straight
 # from the simulator: v = (q(t) - q(t - dt)) / dt. The XL330 does not measure velocity
 # directly either, so this models the smoothing and lag of the real read.
-VELOCITY_FD_DT: float = 0.030
+VELOCITY_FD_DT: float = 0.050
 
 # Extra solver pass that removes residual tangential drift at contacts. MuJoCo's default
 # is 0 (disabled).
@@ -70,6 +71,9 @@ class MuJoCoController:
         # Estimate joint velocity by finite-differencing position over VELOCITY_FD_DT
         # instead of reading the simulator's qvel.
         velocity_finite_difference: bool = False,
+        # Launch the passive MuJoCo viewer. Set False for a headless run (e.g. batch log
+        # replay), where there is no window to step in real time and nothing to sync to.
+        enable_viewer: bool = True,
     ) -> None:
         self._stop_flag_path = Path(stop_flag_path)
         self._reset_source = reset_source
@@ -110,7 +114,7 @@ class MuJoCoController:
         # Built before the pose is set: its constructor calls mj_setConst(), which resets
         # the data back to qpos0. Set the pose first and it silently lands at the origin,
         # buried in the floor, and the contact solver ejects it on the first step.
-        bam_model = bam_load_model(motor_name="xl330", model="m6")
+        bam_model = bam_load_model(motor_name="xl330", model="m4")
         bam_model.actuator.kp = KP_DEFAULT
         bam_model.actuator.vin = BAM_VIN
         self._bam = BamController(
@@ -121,6 +125,9 @@ class MuJoCoController:
             vin_drop_resistance=BAM_VOLTAGE_DROP_RESISTANCE,
             vin_min=BAM_VIN_MIN
         )
+
+        # Supply voltage actually seen by the motors, kept in step with the bam model.
+        self._vin_eff: float = BAM_VIN
 
         # Start from the same state [r] resets to, so a fresh run and a reset are identical.
         self._set_neutral_state()
@@ -156,13 +163,38 @@ class MuJoCoController:
             for mid in MOTOR_TO_ID.values()
         }
 
-        self._viewer = mujoco.viewer.launch_passive(
-            self._model, self._data, key_callback=key_callback
-        )
+        # The left panel is MuJoCo's own simulation options, none of which apply here (the
+        # scheduler drives the stepping), and it covers the robot on a small window. Toggle
+        # it back at runtime with Tab if needed. Skipped entirely when headless.
+        if enable_viewer:
+            self._viewer = mujoco.viewer.launch_passive(
+                self._model, self._data, key_callback=key_callback, show_left_ui=False
+            )
+        else:
+            self._viewer = None
 
         # Sensor indices for IMU readout
         self._sensor_orientation = mujoco.mj_name2id(self._model, mujoco.mjtObj.mjOBJ_SENSOR, "orientation")
         self._sensor_gyro = mujoco.mj_name2id(self._model, mujoco.mjtObj.mjOBJ_SENSOR, "angular-velocity")
+
+    def _viewer_running(self) -> bool:
+        """True while the run should continue. Always True when headless (no window to close)."""
+        return self._viewer is None or self._viewer.is_running()
+
+    def is_running(self) -> bool:
+        """Whether a run should keep going: the viewer window is open, or always when headless."""
+        return self._viewer_running()
+
+    def close(self) -> None:
+        """Close the viewer window, if any. Safe to call on a headless controller."""
+        if self._viewer is not None:
+            self._viewer.close()
+            self._viewer = None
+
+    def _viewer_sync(self) -> None:
+        """Push the latest physics state to the viewer, a no-op when headless."""
+        if self._viewer is not None:
+            self._viewer.sync()
 
     def _joint_positions(self) -> dict[int, float]:
         """Current joint angles for every motor, keyed by motor id."""
@@ -199,7 +231,7 @@ class MuJoCoController:
         pass
 
     def sync_write_goal_position(self, ids: list[int], positions: list[float]) -> None:
-        if not self._viewer.is_running():
+        if not self._viewer_running():
             self._stop_flag_path.write_text("stop\n", encoding="ascii")
             return
 
@@ -209,6 +241,7 @@ class MuJoCoController:
             for motor_id, pos in cmd.items():
                 delayed_pos = self._delay_act[motor_id].push_and_read(pos)
                 self._bam.set_q_target(ID_TO_MOTOR[motor_id], delayed_pos)
+            self._sample_effective_vin()
             self._bam.update()
             mujoco.mj_step(self._model, self._data)
             if self._velocity_fd:
@@ -225,7 +258,7 @@ class MuJoCoController:
                 print(f"Torque sum: {total:.3f} Nm")
                 self._last_torque_print = now
 
-        self._viewer.sync()
+        self._viewer_sync()
 
     def sync_read_present_position(self, ids: list[int]) -> list[float]:
         return [
@@ -255,21 +288,62 @@ class MuJoCoController:
     def read_present_velocity(self, motor_id: int) -> float:
         return float(self._delay_vel[motor_id].push_and_read(self._raw_velocity(motor_id)))
 
+    def _bus_current(self, motor_name: str) -> float:
+        """Battery-side current drawn by one motor [A].
+
+        The phase current is torque / kt, but the H-bridge is a buck stage: the motor draws
+        that continuously while the battery only sources it during the PWM on-time, so the
+        bus sees duty * torque / kt. That is what a supply-side measurement (and the voltage
+        drop in _sample_effective_vin) sees, and it is well below the phase current whenever
+        the duty cycle is small. The product is signed: duty and torque of opposite sign is a
+        joint braking and pushing current back onto the bus.
+        """
+        torque = float(self._data.ctrl[self._name_to_actuator_idx[motor_name]])
+        phase_current = torque / self._bam.model.kt.value
+        duty_cycle = getattr(self._bam.model.actuator, "duty_cycle", None)
+        if duty_cycle is None:  # no control step has run yet
+            return 0.0
+        return float(duty_cycle[self._bam.dof_to_q_target[motor_name]]) * phase_current
+
     def sync_read_present_current(self, ids: list[int]) -> list[float]:
-        # Motor current from the torque applied by the bam model: I = torque / kt.
-        # ctrl holds the (current-clipped) torque set in MujocoController.update().
-        kt = self._bam.model.kt.value
-        return [
-            float(self._data.ctrl[self._name_to_actuator_idx[ID_TO_MOTOR[mid]]] / kt)
-            for mid in ids
-        ]
+        # Bus current, not phase current — see _bus_current. Both ctrl (the current-clipped
+        # torque set by the last MujocoController.update()) and duty_cycle come from that
+        # same update, so they pair up.
+        return [self._bus_current(ID_TO_MOTOR[mid]) for mid in ids]
+
+    def _sample_effective_vin(self) -> None:
+        """Recompute the supply voltage bam is about to apply, just before it consumes it.
+
+        bam derates vin by the drop across the battery + wire resistance, then restores the
+        nominal value before update() returns, so the effective voltage cannot be read back
+        afterwards. This mirrors the computation in BamController.update() on exactly the
+        state that call will see (the previous step's torques and duty cycles), so what the
+        voltage read reports is what the motors actually ran on rather than a constant.
+        """
+        act = self._bam.model.actuator
+        duty_cycle = getattr(act, "duty_cycle", None)
+        if duty_cycle is None:  # no control step has run yet
+            self._vin_eff = BAM_VIN
+            return
+        # Battery current: the H-bridge only sources torque / kt during the PWM on-time, and
+        # the joints share a supply, so sum the signed per-joint draw before clamping at zero.
+        current = float(
+            np.sum(
+                duty_cycle
+                * self._data.qfrc_actuator[self._bam.dof_indexes]
+                / self._bam.model.kt.value
+            )
+        )
+        vin = BAM_VIN - BAM_VOLTAGE_DROP_RESISTANCE * max(current, 0.0)
+        self._vin_eff = max(vin, BAM_VIN_MIN)
 
     def sync_read_present_input_voltage(self, ids: list[int]) -> list[float]:
-        # Volts, matching what RobotController returns after unit conversion.
-        return [BAM_VIN] * len(ids)
+        # Volts, matching what RobotController returns after unit conversion. All motors share
+        # the supply, so they all read the same sagged voltage.
+        return [self._vin_eff] * len(ids)
 
     def read_present_input_voltage(self, motor_id: int) -> float:
-        return BAM_VIN
+        return self._vin_eff
 
     def read_acc(self) -> tuple[float, float, float]:
         """Return pseudo-accelerometer (ax, ay, az) in g from the 'orientation' sensor."""
@@ -328,5 +402,6 @@ class MuJoCoController:
             self._delay_vel[mid].fill(0.0)
         self._delay_gyro.fill((0.0, 0.0, 0.0))
         self._delay_quat.fill((1.0, 0.0, 0.0, 0.0))
+        self._vin_eff = BAM_VIN
         self._reset_pos_history()
-        self._viewer.sync()
+        self._viewer_sync()
