@@ -71,6 +71,10 @@ class Scheduler:
         self._last_imu_print_s: float = 0.0
         self._last_imu_stale_warn_s: float = 0.0
         self._timings: dict[str, list[float]] = {}
+        # Per-tick pack voltage (already averaged over the motors), only filled while [u]
+        # is on. Kept alongside the timings so it shares their window and reset.
+        self._voltage_samples: list[float] = []
+        self._voltage_motors: int = 0
         self._timing_overruns: int = 0
         # Anchored to now rather than 0.0, so a source that starts with timings already on
         # still reports its first full window instead of a single-tick sample.
@@ -177,6 +181,7 @@ class Scheduler:
                         "send": send_s,
                         "tick": time.perf_counter() - start_time,
                     },
+                    robot_state.motor_voltages,
                 )
 
                 if obs.user_input.show_agents:
@@ -222,16 +227,26 @@ class Scheduler:
         finally:
             self._cleanup()
 
-    def _update_timings(self, show: bool, now: float, phases: dict[str, float]) -> None:
+    def _update_timings(
+        self,
+        show: bool,
+        now: float,
+        phases: dict[str, float],
+        voltages: dict[str, float] | None = None,
+    ) -> None:
         """Accumulate per-tick phase durations and report them twice a second.
 
         `read` is the observer (serial + IMU on the robot), `moves` the policy/IK work,
         `send` the bus write (in simulation, the physics step and viewer sync), and `tick`
         the three plus the loop's own overhead — everything before the sleep that keeps
         the loop at its frequency.
+
+        `voltages` is this tick's per-motor input voltage, empty unless [u] is on; when
+        present it is averaged over the window as a battery level readout.
         """
         if not show:
             self._timings.clear()
+            self._voltage_samples.clear()
             self._timing_overruns = 0
             # Keep the window anchored to now, so enabling [p] starts a fresh interval.
             self._last_timing_print_s = now
@@ -241,6 +256,9 @@ class Scheduler:
             self._timings.setdefault(name, []).append(value)
         if phases["tick"] > self.dt:
             self._timing_overruns += 1
+        if voltages:
+            self._voltage_samples.append(sum(voltages.values()) / len(voltages))
+            self._voltage_motors = len(voltages)
 
         if (now - self._last_timing_print_s) < TIMING_PRINT_INTERVAL_S:
             return
@@ -261,9 +279,20 @@ class Scheduler:
             over = f"  ({self._timing_overruns} over budget)" if name == "tick" else ""
             print(f"  {name:<5} avg={avg_ms:6.2f}  max={max_ms:6.2f} ms{over}", end="\r\n", flush=True)
 
+        # Only when [u] is on: without it the observer never reads the voltage register.
+        if self._voltage_samples:
+            avg_v = sum(self._voltage_samples) / len(self._voltage_samples)
+            print(
+                f"  battery  {avg_v:.2f} V  (mean over {self._voltage_motors} "
+                f"motor{'s' if self._voltage_motors != 1 else ''})",
+                end="\r\n",
+                flush=True,
+            )
+
         self._print_bus_stats()
 
         self._timings.clear()
+        self._voltage_samples.clear()
         self._timing_overruns = 0
         self._last_timing_print_s = now
 
@@ -311,13 +340,30 @@ class Scheduler:
         )
         print(f"  errors   {errors} total — {detail}", end="\r\n", flush=True)
 
+    def _height_target(self) -> float | None:
+        """Trunk height [m] commanded this tick, or None if no move is tracking one.
+
+        Read off the moves themselves (Move.height_target_command) rather than recomputed
+        here, so the log carries the very value the policy was given — including the ticks
+        a policy skipped, which stay null instead of showing a target it never saw.
+        """
+        for move in self.registered_moves.values():
+            if move.height_target_command is not None:
+                return move.height_target_command
+        return None
+
     def _update_logging(self, obs: Observation, command: MotorCommand) -> None:
         """Start, feed or stop the log session to follow the [l] toggle."""
         if obs.user_input.logging:
             if not self.logger.active:
                 path = self.logger.start(obs.user_input.log_name)
                 print(f"Logging to {path}", end="\r\n", flush=True)
-            self.logger.record(obs.robot_state, command.target_angles, obs.user_input.velocity)
+            self.logger.record(
+                obs.robot_state,
+                command.target_angles,
+                obs.user_input.velocity,
+                self._height_target(),
+            )
             if self._policy_started is not None:
                 self.logger.mark_policy_start(self._policy_started)
         elif self.logger.active:

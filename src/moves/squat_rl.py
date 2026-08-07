@@ -57,6 +57,11 @@ class SquatRlMove(Move):
         # centre height instead of jumping to wherever a free-running phase happens to be.
         self._start_time_s = 0.0
 
+        # Last height target handed to the policy, picked up by the scheduler for the log
+        # (see Move.height_target_command). None on any tick the policy did not run, so the
+        # log never shows a commanded height the policy was not actually given.
+        self.height_target_command: float | None = None
+
         # Safety parameters
         self._projected_gravity_z_threshold = -0.5  # Threshold for detecting a fall based on projected gravity
 
@@ -69,6 +74,7 @@ class SquatRlMove(Move):
             self._controller.sync_write_kp(ids, [KP_RL] * len(ids))
         self._start_time_s = obs.robot_state.time_s
         self._last_action = [0.0] * len(OBSERVATION_DOF_ORDER)
+        self.height_target_command = None
         self.state = MoveState.ACTIVE
 
     def height_target(self, obs: Observation) -> float:
@@ -81,6 +87,7 @@ class SquatRlMove(Move):
     def step(self, obs: Observation, command: MotorCommand) -> None:
         # Safety check: if the robot is fallen, stop the policy
         if obs.robot_state.projected_gravity[2] > self._projected_gravity_z_threshold:
+            self.height_target_command = None
             return
 
         # Run policy
@@ -113,8 +120,10 @@ class SquatRlMove(Move):
         # Last action
         input_obs.extend(self._last_action)
 
-        # Command: the trunk height target the policy tracks
-        input_obs.append(self.height_target(obs))
+        # Command: the trunk height target the policy tracks. Kept on the move as well, so
+        # the scheduler logs exactly the value that went into the observation.
+        self.height_target_command = self.height_target(obs)
+        input_obs.append(self.height_target_command)
 
         return input_obs
 
@@ -122,4 +131,7 @@ class SquatRlMove(Move):
         if self._controller is not None:
             ids = list(MOTOR_TO_ID.values())
             self._controller.sync_write_kp(ids, [KP_DEFAULT] * len(ids))
+        # Cleared here too, so the log stops showing the last commanded height once the
+        # policy is no longer the one driving the robot.
+        self.height_target_command = None
         self.state = MoveState.INACTIVE

@@ -49,6 +49,12 @@ class Move(ABC):
     # when one of these goes active, so runs of the same manoeuvre can be time-aligned.
     is_policy: bool = False
 
+    # Trunk height [m] this move is commanding on the current tick, or None when it commands
+    # none. A height-tracking policy (squat_rl) writes its target here each tick; the
+    # scheduler records it as the log's `command.height` channel, so the commanded height can
+    # be read against the trunk height the run actually produced.
+    height_target_command: float | None = None
+
     def __init__(self) -> None:
         self.state: MoveState = MoveState.INACTIVE
 

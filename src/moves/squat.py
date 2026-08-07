@@ -8,6 +8,7 @@ import numpy as np
 
 from observer import Observation
 from moves.move import MotorCommand, Move, MoveState
+from placo_utils.tf import tf
 from constants import NEUTRAL_POSE
 
 _LOWER_JOINTS = [
@@ -78,7 +79,7 @@ class SquatMove(Move):
         self._robot.set_T_world_frame("left_foot", self._T_left_foot)
         self._robot.update_kinematics()
 
-        self._com_initial = self._robot.com_world()
+        self._com_initial = self._robot.com_world() + np.array([0.01, 0.0, 0.00])
         T_right_foot = self._robot.get_T_world_frame("right_foot").copy()
         T_right_foot[2, 3] = 0.0
 
@@ -89,8 +90,8 @@ class SquatMove(Move):
 
         self._com_task = self._solver.add_com_task(self._com_initial)
         self._com_task.configure("com", "soft", 100.0)
-
-        trunk_task = self._solver.add_orientation_task("trunk", np.eye(3))
+    
+        trunk_task = self._solver.add_orientation_task("trunk", tf.rotation_matrix(0.2, [0, 1, 0])[:3, :3])
         trunk_task.configure("trunk_orient", "soft", 1.0)
 
         joints_task = self._solver.add_joints_task()

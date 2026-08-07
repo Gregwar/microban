@@ -86,7 +86,10 @@ class RobotLogger:
             # frame (IMU_MOUNT_QUAT is not identity), so it is this one — not `quat` —
             # that yields the robot's roll/pitch.
             "body_quat": {axis: [] for axis in ("w", "x", "y", "z")},
-            "command": {axis: [] for axis in ("vx", "vy", "vtheta")},
+            # Command fed to the policies: the velocity axes, plus the trunk height target
+            # a height-tracking policy (squat_rl) is following. "height" is null on ticks
+            # where no move commanded one, so a 0 there always means a real 0 m command.
+            "command": {axis: [] for axis in ("vx", "vy", "vtheta", "height")},
         }
         return self._path
 
@@ -108,8 +111,14 @@ class RobotLogger:
         robot_state,
         target_angles: dict[str, float],
         command_velocity: dict[str, float],
+        height_target: float | None = None,
     ) -> None:
-        """Append one tick. `command_velocity` is the scaled (vx, vy, vtheta) fed to the policy."""
+        """Append one tick.
+
+        `command_velocity` is the scaled (vx, vy, vtheta) fed to the policy, and
+        `height_target` the trunk height [m] a height-tracking policy is following this
+        tick (None when no move commanded one).
+        """
         if not self.active:
             return
 
@@ -139,6 +148,7 @@ class RobotLogger:
 
         for axis in ("vx", "vy", "vtheta"):
             s["command"][axis].append(_as_float(command_velocity.get(axis, 0.0)))
+        s["command"]["height"].append(_as_float(height_target))
 
     def stop(self) -> Path | None:
         """Write the session to disk and return its path (None if nothing was recorded).

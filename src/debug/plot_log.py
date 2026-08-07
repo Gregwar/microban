@@ -93,7 +93,7 @@ EMA_TRACES = frozenset({"body vx", "body vy", "body vyaw"})
 # log see it). Overlaid on the odometry trace of the same axis, so what the robot was asked
 # for and what it actually did read off one pair of curves. Note `vtheta` pairs with the
 # yaw *rate*, which is why `body vyaw` replaced `body vz` here.
-COMMAND_AXIS = {"body vx": "vx", "body vy": "vy", "body vyaw": "vtheta"}
+COMMAND_AXIS = {"body vx": "vx", "body vy": "vy", "body vyaw": "vtheta", "odom z": "height"}
 
 # Black in both solo and comparison figures: the command is the target being tracked, not
 # one more per-log measurement, so it should not take a log's colour. Solid, to stay
@@ -104,9 +104,14 @@ COMMAND_STYLE = {"color": "black", "linewidth": 1.2}
 # average the within-stride swing away, short enough to still follow a change of command.
 VELOCITY_EMA_TAU_S = 0.75
 
+# The squat policy's trunk height target (src/robot_logger.py "command.height"). It is
+# overlaid on `odom z` above, but that trace only exists with --odometry, so it also stands
+# on its own: reading the commanded sine back is the first check on a squat run.
+COMMAND_UNITS = {"height target": "m"}
+
 # Everything plotted full width, with no goal/read pair: one label -> unit lookup for all
 # of them, so they share a single rendering path.
-TRACE_UNITS = {**IMU_UNITS, **ODOMETRY_UNITS}
+TRACE_UNITS = {**IMU_UNITS, **ODOMETRY_UNITS, **COMMAND_UNITS}
 
 # Servo telemetry recorded only while [u] was on during the run. Each channel gets a column
 # on every ticked joint plus a full-width aggregate row: the motors share one supply, so the
@@ -208,6 +213,19 @@ def imu_channels(log: dict) -> dict[str, list[float]]:
             out[f"gyro {axis}"] = series(gyro[axis])
 
     return out
+
+
+def command_channels(log: dict) -> dict[str, list[float]]:
+    """Policy commands worth a trace of their own, keyed by the label on its checkbox.
+
+    Only the height target: the velocity axes are overlaid on the odometry trace they drive
+    (COMMAND_AXIS), whereas the height target is null on every tick no policy commanded one,
+    which makes it readable on its own — the gaps say when the squat was running.
+    """
+    command = log.get("command")
+    if not _has_data(command, "height"):
+        return {}
+    return {"height target": series(command["height"])}
 
 
 def odometry_samples(log: dict) -> list:
@@ -490,7 +508,7 @@ def build_figure(entries: list[tuple[Path, dict]], odometry: list[list] | None =
     # The odometry is replayed on its own finer grid (odometry.ODOMETRY_DT), so it does not
     # share the log's tick times and carries an x axis of its own. `trace_times` holds that
     # override; anything absent from it is sampled at the log's own ticks.
-    traces = [imu_channels(log) for log in logs]
+    traces = [imu_channels(log) | command_channels(log) for log in logs]
     trace_times: list[dict[str, list[float]]] = [{} for _ in logs]
     if odometry is not None:
         for i, samples in enumerate(odometry):

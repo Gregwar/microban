@@ -164,7 +164,12 @@ def replay(log: dict, view: bool, log_name: str | None, settle_time: float) -> N
                 axis: (command.get(axis, [])[i] if i < len(command.get(axis, [])) else 0.0)
                 for axis in ("vx", "vy", "vtheta")
             }
-            logger.record(robot_state, targets, command_velocity)
+            # Carried over from the source log rather than recomputed: the replay commands
+            # joint targets, not a height, so the only honest height command is the one the
+            # original run recorded.
+            heights = command.get("height", [])
+            height_target = heights[i] if i < len(heights) else None
+            logger.record(robot_state, targets, command_velocity, height_target)
             if switched:
                 # First call wins, so this stamps the produced log's policy_t0 once.
                 logger.mark_policy_start(policy_name)
