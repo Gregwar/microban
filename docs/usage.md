@@ -46,6 +46,7 @@ by default; add `HOST=microban-ext` to operate over the secondary network (see t
 | `v` | toggle the **walk** move |
 | `h` | toggle the **head** move |
 | `s` | toggle the **squat** move |
+| `g` | toggle the **getup** move |
 | arrows | `vx` (up/down), `vtheta` (left/right) |
 | `x` | reset velocity to zero |
 | `i` | toggle the IMU/gyro display |
@@ -75,6 +76,15 @@ Figures are averaged over the window rather than printed every tick: at 50 Hz a 
 print would flood the terminal, and the writing would itself distort what is being
 measured. For the same reason the numbers exclude the timing and IMU displays themselves.
 
+With `u` also on, the report gains a battery line — the servo input voltage averaged over
+every motor, and over the window like the timings above it:
+
+```
+  battery  11.68 V  (mean over 14 motors)
+```
+
+It only appears while `u` is on, since the voltage register is not read otherwise.
+
 ## Logging a session
 
 Press `l` to start recording, and `l` again to stop. On start you are prompted for an
@@ -83,14 +93,16 @@ JSON file under `logs/`, named after its start date plus that name:
 `logs/2026-07-17_14-32-05_walk-test.json`.
 
 Every tick records the target position, the read position and velocity of each motor, the
-IMU gyro and quaternion, and the `vx`/`vy`/`vtheta` command fed to the walk policy. Channels
-are keyed by motor name and are all the same length as `time`, so a dropped IMU read shows
-up as `null` rather than shifting the series.
+IMU gyro and quaternion, and the command fed to the policies: `vx`/`vy`/`vtheta` for the walk
+policy, and `height` — the trunk height target in metres — for the squat policy, `null` on
+every tick where no move commanded one. Channels are keyed by motor name and are all the
+same length as `time`, so a dropped IMU read shows up as `null` rather than shifting the
+series.
 
 Quitting with `q` while a session is running still writes the file. Logs stay on the robot
 until you pull them over with `make get-logs`, which copies them into your local `logs/`.
 
-If a policy (`walk`, `squat_rl`) goes active during the session, the moment it started is
+If a policy (`walk`, `squat_rl`, `getup`) goes active during the session, the moment it started is
 recorded as `policy_t0` in the log's metadata. A policy already running when you press `l`
 is not stamped, since its real start time falls outside the log.
 
@@ -100,8 +112,11 @@ dashed, read solid) and velocity; untick to take it away. Nothing is plotted unt
 something. The `debug` group carries matplotlib for the scripts in `src/debug/`; it is not
 installed on the robot.
 
-Below the joints, `roll`, `pitch` and `gyro x/y/z` tick the same way, each taking a
-full-width row since they have no goal to compare against. Roll and pitch are the trunk's,
+Below the joints, `roll`, `pitch`, `gyro x/y/z` and — on a log where the squat policy ran —
+`height target` tick the same way, each taking a full-width row since they have no goal to
+compare against. `height target` is the trunk height the squat policy was told to track, so
+a squat run should read back as the commanded sine, with gaps wherever the policy was not
+running. Roll and pitch are the trunk's,
 in degrees, derived from the logged `body_quat`; the gyro is plotted raw, in the IMU sensor
 frame — the same signal the policies observe. Logs recorded before `body_quat` existed
 still offer the gyro, but not roll/pitch.
@@ -115,6 +130,71 @@ uv run --group debug src/debug/plot_log.py logs/a.json logs/b.json
 When every log has a `policy_t0`, time is shifted so `t = 0` is the policy start in each
 run, lining the traces up however late you happened to press `l`. If any log lacks it, the
 comparison falls back to raw log time and says so.
+
+### Odometry
+
+`--odometry` replays the log through the kinematic estimator in `src/odometry.py` and adds
+where the robot went: `odom x/y/z` (the trunk in the world, in metres), `odom yaw` (its
+heading in degrees, unwrapped so a turn reads continuously), `body vx/vy` (the trunk's
+linear velocity in its own frame) and `body vyaw` (its yaw rate). They tick like any other
+trace.
+
+`body vyaw` is the gyro with the IMU mount rotation taken out, so it is the trunk yaw rate
+itself — the raw `gyro y` channel is the *negative* of it, which is easy to misread.
+
+Those three velocity rows each carry two overlays. A dashed EMA (0.75 s, a stride or two)
+in the log's own colour: the raw curve swings by ±0.5 m/s within every stride, so the EMA is
+what you read a sustained walking speed or a steady turn rate off. And a solid black line
+for the velocity *command* — the `vx`/`vy`/`vtheta` the scheduler handed the policy, logged
+in physical units, so tracking error reads straight off the gap between black and dashed.
+The command is black in comparison figures too: it is the shared target, not a per-log
+measurement. Logs predating the `command` channel just get no black line.
+
+`odom z` carries the same black overlay for the squat policy: the trunk height it was asked
+for against the height the kinematics say it reached.
+
+Worth knowing what that gap looks like. On `old_logs/2026-07-23_08-37-17_walk_m4_cur.json`,
+steady walking commanded 0.479 m/s forward and the odometry estimates 0.313 — the robot
+delivers about two thirds of what it is asked for. On the same stretch `vtheta` is commanded
+0 while the estimate sits at −0.085 rad/s, i.e. ~5 deg/s of unasked-for yaw.
+
+```
+uv run --group debug src/debug/plot_log.py logs/a.json --odometry
+```
+
+The estimate is a Python transcription of what the rhoban humanoid runs online. Each tick it
+puts the read joint angles into a placo model, takes the floating base angular velocity
+straight from the gyro, hands the support anchor to whichever sole corner is now lowest —
+the `*_foot_front_left` and friends sites in `src/model/mjcf/robot.xml` — solves for the base
+linear velocity that keeps that anchor immobile, and re-hangs the robot from it at the
+attitude `body_quat` reports. Position therefore accumulates step by step from the
+kinematics: it is dead reckoning, it drifts, and nothing ever corrects it. Heading is the
+IMU's own gyro-integrated yaw. The velocities are per-tick estimates driven by the servos'
+own velocity reads, so they are noisy at stride frequency even when the position curve is
+clean.
+
+The log is linearly interpolated up to a uniform 5 ms grid (`odometry.ODOMETRY_DT`) before
+any of that runs, so the odometry traces are on a finer time axis than the rest of the plot.
+The anchor is only ever re-planted *between* ticks, wherever forward kinematics says the new
+corner is at the moment the switch is noticed, so the grid sets how late every transfer
+lands. It matters more than it looks: on a 24 s walk log, refining 20 ms → 10 → 5 → 2.5 →
+1.25 ms moves the final position by 0.27, 0.13, 0.05 and 0.03 m respectively — halving each
+time, converging. 20 ms is the outlier; 5 ms lands within ~0.1 m of the limit for
+essentially no extra cost (the placo model load dominates the runtime either way).
+
+`--view` replays that estimate in the MuJoCo viewer instead of plotting, looping until you
+close the window, paced by the log's own timestamps:
+
+```
+uv run --group debug --group sim src/debug/plot_log.py logs/a.json --view
+```
+
+The joints come from the recorded readback and the floating base from the odometry, both on
+that same interpolated 5 ms grid, so the playback is smoother than the 50 Hz the log was
+recorded at. Only forward kinematics runs, nothing is simulated. So this shows what the estimator believes
+happened — a foot sinking through the floor or hovering above it is the drift made visible.
+For a *physical* replay, where the log's goal positions drive simulated motors, use
+`src/debug/sim_log.py` instead.
 
 > While the name prompt is open, keys are captured by the prompt — `Ctrl+C` still stops
 > the control loop if you need it.
@@ -134,6 +214,11 @@ Moves are toggled independently and run on top of the neutral pose:
   set from the arrow keys or the gamepad sticks.
 - **Head** (`h`) — oscillates the head.
 - **Squat** (`s`) — squat motion computed with inverse kinematics.
+- **Getup** (`g`) — a reinforcement-learning policy that rights the robot from a fallen
+  pose, face down, face up or on its side, and keeps balancing once it is up. It takes no
+  command: toggle it on where the robot lies, and off once it is standing. Unlike the walk
+  and squat policies it has no fall check — being fallen is what it is for — so it will
+  keep driving the joints whatever the orientation until you untoggle it.
 
 ### Velocity command
 
