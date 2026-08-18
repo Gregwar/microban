@@ -23,7 +23,7 @@ LOGGING = False
 MIRROR = False
 
 # Policy name
-AGENT_NAME = "walk.onnx"
+AGENT_NAME = "walk_m6_l1.onnx"
 
 
 class WalkMove(Move):

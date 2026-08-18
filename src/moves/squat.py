@@ -6,10 +6,11 @@ import placo
 
 import numpy as np
 
+from controller import ControllerProtocol
 from observer import Observation
 from moves.move import MotorCommand, Move, MoveState
 from placo_utils.tf import tf
-from constants import NEUTRAL_POSE
+from constants import MOTOR_TO_ID, NEUTRAL_POSE, KP_DEFAULT
 
 _LOWER_JOINTS = [
     "left_hip_yaw", "left_hip_roll", "left_hip_pitch",
@@ -31,17 +32,27 @@ LOGGING = False
 class SquatMove(Move):
     """Squat motion using placo IK."""
 
+    is_policy = True
+
     def __init__(
         self,
         frequency: float = 0.25,
         amplitude: float = 0.02,
         lerp_duration: float = 1.0,
+        controller: ControllerProtocol | None = None,
+        kp: int = KP_DEFAULT,
     ) -> None:
         super().__init__()
         self._model_path = "src/model/urdf"
         self.frequency = frequency
         self.amplitude = amplitude
         self.lerp_duration = lerp_duration
+
+        # Position gain the motors run at while this move drives them. Written on the first
+        # STARTING tick and restored to KP_DEFAULT when the move stops, so a softer (or
+        # stiffer) squat can be tried without touching the gain the rest of the loop uses.
+        self._controller = controller
+        self.kp = kp
 
         self._start_lerp_time_s: float | None = None
         self._start_lerp_angles: list[float] = []
@@ -79,7 +90,7 @@ class SquatMove(Move):
         self._robot.set_T_world_frame("left_foot", self._T_left_foot)
         self._robot.update_kinematics()
 
-        self._com_initial = self._robot.com_world() + np.array([0.01, 0.0, 0.00])
+        self._com_initial = self._robot.com_world() + np.array([0.015, 0.0, 0.00])
         T_right_foot = self._robot.get_T_world_frame("right_foot").copy()
         T_right_foot[2, 3] = 0.0
 
@@ -114,6 +125,9 @@ class SquatMove(Move):
     def on_start(self, obs: Observation, command: MotorCommand) -> None:
         self._initialize()
         if self._start_lerp_time_s is None:
+            if self._controller is not None:
+                ids = list(MOTOR_TO_ID.values())
+                self._controller.sync_write_kp(ids, [self.kp] * len(ids))
             self._start_lerp_time_s = obs.robot_state.time_s
             self._start_lerp_angles = [obs.robot_state.motor_positions.get(name, 0.0) for name in _LOWER_JOINTS + _UPPER_JOINTS]
 
@@ -179,6 +193,9 @@ class SquatMove(Move):
                 }, f, indent=2)
 
         if self._stop_lerp_time_s is None:
+            if self._controller is not None:
+                ids = list(MOTOR_TO_ID.values())
+                self._controller.sync_write_kp(ids, [KP_DEFAULT] * len(ids))
             self._stop_lerp_time_s = obs.robot_state.time_s
             self._stop_lerp_angles = [obs.robot_state.motor_positions.get(name, 0.0) for name in _LOWER_JOINTS + _UPPER_JOINTS]
 

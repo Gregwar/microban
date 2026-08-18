@@ -60,7 +60,7 @@ class Scheduler:
         # All moves are registered here. They only run when activated via user_input.active_moves.
         self.registered_moves: dict[str, Move] = moves if moves is not None else {
             "head": RotateHeadMove(),
-            "squat": SquatMove(),
+            "squat": SquatMove(controller=controller),
             "walk": WalkMove(),
         }
 
@@ -319,6 +319,11 @@ class Scheduler:
         Counters run from startup rather than over the timing window, so a fault that
         happened once during a run stays visible instead of scrolling away. Silent on
         controllers that do not track them (the simulation).
+
+        When anything has gone wrong, the totals are followed by the per-motor breakdown:
+        which motor faulted, how, and when it last did. That is the part worth acting on —
+        one motor accounting for every fault is a wire or a connector, faults spread evenly
+        over all nineteen are the baud rate, the supply, or noise.
         """
         getter = getattr(self.controller, "get_bus_stats", None)
         if not callable(getter):
@@ -334,11 +339,18 @@ class Scheduler:
             end="\r\n",
             flush=True,
         )
-        detail = (
-            f"missing={s['missing']} timeouts={s['errors']} malformed={s['malformed']} "
-            f"retries={s['fallbacks']} loop={self._serial_errors_total}"
+        kinds = s.get("by_kind", {})
+        detail = " ".join(f"{kind}={count}" for kind, count in sorted(kinds.items())) or "none"
+        print(
+            f"  errors   {errors} total — {detail} retries={s['fallbacks']} "
+            f"loop={self._serial_errors_total}",
+            end="\r\n",
+            flush=True,
         )
-        print(f"  errors   {errors} total — {detail}", end="\r\n", flush=True)
+
+        lines = getattr(self.controller, "get_bus_report_lines", lambda: [])()
+        for line in lines:
+            print(line, end="\r\n", flush=True)
 
     def _height_target(self) -> float | None:
         """Trunk height [m] commanded this tick, or None if no move is tracking one.

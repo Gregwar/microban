@@ -11,7 +11,7 @@ from observer import Observation
 from moves.move import MotorCommand, Move, MoveState, onnx_run_name
 
 # Policy name
-AGENT_NAME = "squat.onnx"
+AGENT_NAME = "squat_m1.onnx"
 
 # Squat trajectory. The policy tracks a trunk-height target; this move plays that target
 # as the same sine the training command did (mjlab SquatHeightCommand):

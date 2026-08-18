@@ -114,7 +114,7 @@ class MuJoCoController:
         # Built before the pose is set: its constructor calls mj_setConst(), which resets
         # the data back to qpos0. Set the pose first and it silently lands at the origin,
         # buried in the floor, and the contact solver ejects it on the first step.
-        bam_model = bam_load_model(motor_name="xl330", model="m4")
+        bam_model = bam_load_model(motor_name="xl330", model="m6")
         bam_model.actuator.kp = KP_DEFAULT
         bam_model.actuator.vin = BAM_VIN
         self._bam = BamController(

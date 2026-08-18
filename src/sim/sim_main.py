@@ -28,8 +28,8 @@ def main() -> None:
     parser.add_argument("--delay-act", type=int, default=2, metavar="STEPS", help="Actuation delay in simulator steps (1 step = 0.005 s)")
     parser.add_argument("--delay-pos", type=int, default=0, metavar="TICKS", help="Motor position read delay in scheduler ticks (1 tick = 20 ms at 50 Hz)")
     parser.add_argument("--delay-vel", type=int, default=1, metavar="TICKS", help="Motor velocity read delay in ticks")
-    parser.add_argument("--delay-gyro", type=int, default=3, metavar="TICKS", help="Gyro read delay in ticks")
-    parser.add_argument("--delay-quat", type=int, default=4, metavar="TICKS", help="Quaternion (projected gravity) read delay in ticks")
+    parser.add_argument("--delay-gyro", type=int, default=2, metavar="TICKS", help="Gyro read delay in ticks")
+    parser.add_argument("--delay-quat", type=int, default=2, metavar="TICKS", help="Quaternion (projected gravity) read delay in ticks")
     parser.add_argument("--trunk-com-offset", type=float, nargs=3, default=[0.0, 0.0, 0.0], metavar=("X", "Y", "Z"), help="CoM offset on trunk body in meters (body frame)")
     parser.add_argument("--fd-velocity", action="store_true", help=f"Estimate joint velocity by finite differences over {VELOCITY_FD_DT * 1e3:.0f} ms instead of reading the simulator's qvel")
     args = parser.parse_args()
@@ -60,7 +60,7 @@ def main() -> None:
         moves={
             "head": RotateHeadMove(),
             "benchmark": BenchmarkMove(),
-            "squat": SquatMove(),
+            "squat": SquatMove(controller=controller),
             "squat_rl": SquatRlMove(controller=controller),
             "getup": GetupMove(controller=controller),
             "walk": WalkMove(controller=controller),

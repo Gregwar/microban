@@ -76,7 +76,7 @@ def main() -> None:
             moves={
                 "head": RotateHeadMove(),
                 "benchmark": BenchmarkMove(),
-                "squat": SquatMove(),
+                "squat": SquatMove(controller=controller),
                 "squat_rl": SquatRlMove(controller=controller),
                 "getup": GetupMove(controller=controller),
                 "walk": WalkMove(controller=controller),

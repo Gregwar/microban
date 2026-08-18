@@ -2,11 +2,11 @@
 # Copyright 2026 Marc Duclusaud
 
 import os
-from dataclasses import dataclass
 
 from rustypot import Xl330PyController
 import numpy as np
 
+from bus_monitor import BusMonitor
 from constants import MOTOR_TO_ID, MOTOR_SIGN, IMU_I2C_BUS, MOTOR_BAUDRATE, PRESENT_CURRENT_UNIT_A, PRESENT_VOLTAGE_UNIT_V
 from imu_reader import ThreadedIMUReader
 from xl330_state import (
@@ -28,32 +28,6 @@ FUSED_POSITION_TOLERANCE_RAD = 0.01
 # supply moves between the two reads, so this only has to catch a wrong offset — which
 # would land in a trajectory register and be wrong by volts, not by tenths.
 FUSED_VOLTAGE_TOLERANCE_V = 0.5
-
-
-@dataclass
-class BusStats:
-    """Protocol 2.0 traffic counters, reported by [p] alongside the timings.
-
-    Counts packets, not calls: one sync transaction is a single broadcast instruction
-    packet, answered by one status packet per motor. Writes are not counted as expecting
-    an answer — main.py sets status_return_level to 1, so the motors only reply to reads.
-    """
-
-    sent: int = 0        # instruction packets put on the wire
-    received: int = 0    # status packets that came back
-    expected: int = 0    # status packets that should have come back
-    errors: int = 0      # transactions that raised (timeout, port error)
-    malformed: int = 0   # status payloads that would not decode
-    fallbacks: int = 0   # fused reads that had to retry as separate typed reads
-
-    @property
-    def missing(self) -> int:
-        """Status packets never received — a motor that did not answer in time."""
-        return max(0, self.expected - self.received)
-
-    @property
-    def error_total(self) -> int:
-        return self.errors + self.malformed + self.missing
 
 
 class RobotController:
@@ -84,7 +58,10 @@ class RobotController:
         self._imu_reader = ThreadedIMUReader(i2c_bus=IMU_I2C_BUS, frequency_hz=200.0)
         self._imu_reader.start()
 
-        self.stats = BusStats()
+        self.stats = BusMonitor()
+        # Ping every motor after an unattributable failure to name the silent one. Off by
+        # default: it costs 19 extra round trips, inside a tick that has already overrun.
+        self.probe_on_failure = os.environ.get("MICROBAN_BUS_PROBE", "0").lower() in ("1", "on", "true")
         self._fused_fallbacks = 0
         mode = (fused_read or os.environ.get("MICROBAN_FUSED_READ", "auto")).lower()
         self.fused_read_enabled = self._resolve_fused_read(mode)
@@ -102,54 +79,75 @@ class RobotController:
         """Run one read transaction, counting the packets it sent and got back.
 
         Every bus read goes through here so the [p] report reflects the whole session
-        rather than whichever call sites were remembered.
+        rather than whichever call sites were remembered. A failure is handed to the
+        monitor along with the ids it was asking for, which is what lets the report name
+        the motor at fault — see bus_monitor for how the id is recovered.
         """
-        self.stats.sent += 1
-        self.stats.expected += len(ids)
+        self.stats.record_sent(len(ids))
         try:
             result = fn(ids, *args)
-        except Exception:
-            self.stats.errors += 1
+        except Exception as exc:
+            self._record_failure(getattr(fn, "__name__", "read"), ids, exc)
             raise
-        # A driver that drops a silent motor returns a short list; count the gap rather
-        # than assuming every read was answered in full.
-        self.stats.received += len(result) if hasattr(result, "__len__") else 1
+        # rustypot's sync_read aborts on the first motor that does not answer rather than
+        # returning a short list, so a full-length result means every motor replied.
+        self.stats.record_received(len(result) if hasattr(result, "__len__") else 1)
         return result
 
     def _read_one(self, fn, motor_id, *args):
         """Same, for the single-motor reads."""
-        self.stats.sent += 1
-        self.stats.expected += 1
+        self.stats.record_sent(1)
         try:
             result = fn(motor_id, *args)
-        except Exception:
-            self.stats.errors += 1
+        except Exception as exc:
+            # One id, so there is nothing to disambiguate: whatever went wrong was this
+            # motor's, including the timeouts a sync read could not have attributed.
+            self.stats.record_exception(
+                getattr(fn, "__name__", "read"), [motor_id], exc, attribute_to=motor_id
+            )
             raise
-        self.stats.received += 1
+        self.stats.record_received(1)
         return result
 
     def _write(self, fn, ids, *args) -> None:
         """Run one write transaction. No status packet is expected (return level 1)."""
-        self.stats.sent += 1
+        self.stats.record_sent()
         try:
             fn(ids, *args)
-        except Exception:
-            self.stats.errors += 1
+        except Exception as exc:
+            self._record_failure(getattr(fn, "__name__", "write"), ids, exc)
             raise
 
+    def _record_failure(self, op: str, ids: list[int], exc: Exception) -> None:
+        """Log the fault, and optionally ping to find out whose it was.
+
+        The ping only runs when the frame carried no id to blame (a timeout, a corrupted
+        frame) and MICROBAN_BUS_PROBE is set — it is the difference between "something on
+        the bus timed out" and "left_knee is not answering", but it is far too expensive to
+        do on every tick of a run that is faulting continuously.
+        """
+        fault = self.stats.record_exception(op, list(ids), exc)
+        if fault.motor is None and self.probe_on_failure:
+            self.stats.record_probe(self._ping_silent(ids), op)
+
+    def _ping_silent(self, ids: list[int]) -> list[int]:
+        """Which of `ids` do not answer a ping. Never raises: this runs inside error handling."""
+        silent = []
+        for motor_id in ids:
+            try:
+                if not self._controller.ping(motor_id):
+                    silent.append(motor_id)
+            except Exception:
+                silent.append(motor_id)
+        return silent
+
     def get_bus_stats(self) -> dict:
-        """Snapshot of the traffic counters, for the scheduler's [p] report."""
-        s = self.stats
-        return {
-            "sent": s.sent,
-            "received": s.received,
-            "expected": s.expected,
-            "missing": s.missing,
-            "errors": s.errors,
-            "malformed": s.malformed,
-            "fallbacks": s.fallbacks,
-            "error_total": s.error_total,
-        }
+        """Snapshot of the traffic counters and per-motor faults, for the [p] report."""
+        return self.stats.snapshot()
+
+    def get_bus_report_lines(self) -> list[str]:
+        """The per-motor fault breakdown [p] prints under the packet counters."""
+        return self.stats.report_lines()
 
     # ------------------------------------------------------------------
     # Fused state read
@@ -267,8 +265,10 @@ class RobotController:
         for motor_id, block in zip(ids, blocks):
             try:
                 decoded = decode(block)
-            except ValueError:
-                self.stats.malformed += 1
+            except ValueError as exc:
+                # The one fault that never needs detective work: we are holding the block
+                # and the id it came from, so [p] can name the motor outright.
+                self.stats.record_malformed("sync_read_state", motor_id, str(exc))
                 return self._read_state_separately(ids, include_voltage)
             current_raw, velocity_raw, position_ticks = decoded[:3]
             sign = self._id_to_sign[motor_id]
@@ -292,7 +292,7 @@ class RobotController:
         majority of reads.
         """
         self._fused_fallbacks += 1
-        self.stats.fallbacks = self._fused_fallbacks
+        self.stats.record_fallback()
         if self._fused_fallbacks in (1, 100) or self._fused_fallbacks % 1000 == 0:
             print(
                 f"Note: fused read fell back to separate reads (byte-stuffed frame); "
@@ -372,6 +372,16 @@ class RobotController:
         """Return orientation quaternion (w, x, y, z)."""
         _ = dt
         return self._imu_reader.get_latest().quat
+
+    def get_imu_sample(self):
+        """The latest IMUSnapshot, with the timestamp of the sample it was built from.
+
+        read_acc/read_gyro/read_quat hand back the values alone, which is all a policy
+        needs. Anything timing the IMU also needs to know *when* the sample was taken —
+        the reader runs on its own thread, so the freshest sample is already a few ms old
+        by the time a tick asks for it. See src/imu_delay_record.py.
+        """
+        return self._imu_reader.get_latest()
 
     def get_imu_status(self) -> dict[str, float | int | bool]:
         return self._imu_reader.get_status()

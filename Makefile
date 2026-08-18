@@ -1,4 +1,4 @@
-.PHONY: sync setup run stop shutdown voltage imu sim viewer get-logs check-read set-baud gamepad-headless-enable gamepad-headless-disable
+.PHONY: sync setup run stop shutdown voltage imu imu-delay sim viewer get-logs check-read set-baud gamepad-headless-enable gamepad-headless-disable
 
 HOST ?= microban
 ID ?=
@@ -58,6 +58,14 @@ voltage: sync
 
 imu: sync
 	ssh -tt $(HOST) "bash -l -c 'cd microban && PYTHONPATH=src .venv/bin/python src/imu.py'"
+
+# Record encoders + IMU with torque OFF, then measure how late the IMU is by comparing the
+# trunk pitch from forward kinematics against the one the IMU reports. Hold the robot with
+# its feet flat and rock it fore/aft while it records; read src/imu_delay_record.py first.
+# Afterwards: `make get-logs`, then src/debug/imu_delay_analyze.py on the file it names.
+#   make imu-delay ARGS="--duration 60"
+imu-delay: sync
+	ssh -tt $(HOST) "bash -l -c 'cd microban && PYTHONPATH=src .venv/bin/python src/imu_delay_record.py $(ARGS)'"
 
 # Verify the fused motor state read against the driver's own registers, and time it.
 # Read-only (no torque, no goal writes) — leave the robot still on the bench.

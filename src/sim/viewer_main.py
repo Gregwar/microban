@@ -31,7 +31,7 @@ def main() -> None:
         input_source=input_source,
         moves={
             "head": RotateHeadMove(),
-            "squat": SquatMove(),
+            "squat": SquatMove(controller=controller),
         },
     )
     scheduler.run()

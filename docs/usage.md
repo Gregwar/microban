@@ -85,6 +85,62 @@ every motor, and over the window like the timings above it:
 
 It only appears while `u` is on, since the voltage register is not read otherwise.
 
+## Tracing packet loss
+
+The same report carries the motor bus traffic, counted from startup rather than over the
+window so that a fault which happened once during the run stays on screen:
+
+```
+  packets  sent=2007  received=38000/38133  (0.35% missing)
+  errors   9 total — silent=6 timeout=1 malformed=1 retries=1 loop=1
+```
+
+`sent` counts instruction packets; `received`/`expected` counts the status packets the
+motors owe in reply. One silent motor costs a whole transaction, not one packet: the driver
+aborts a sync read at the first reply that does not parse and discards the ones it had
+already collected, so nineteen motors' worth of state is lost each time. That is why
+`missing` climbs in steps of nineteen while `errors` climbs by one.
+
+When anything has gone wrong, the per-motor breakdown follows — the part worth acting on:
+
+```
+  faults by motor
+    right_knee (24)          silentx5                           last t=41.3s
+    left_elbow (33)          malformedx1                        last t=52.8s
+    answered in a silent slot: right_ankle_pitch (25)x5
+  unattributed  timeoutx1  (no id in the frame that failed)
+                MICROBAN_BUS_PROBE=1 pings after a failure to name the motor
+  last 5 faults
+    t=   41.3s  sync_read_raw_data     silent    right_knee (24)  <- right_ankle_pitch (25) answered instead
+    t=   52.8s  sync_read_state        malformed left_elbow (33)
+```
+
+The fault kinds, and what each one points at:
+
+| kind | what happened | usual cause |
+| --- | --- | --- |
+| `silent` | the motor did not answer its slot, so the *next* motor's reply was read in its place | that motor's wiring, connector, or power |
+| `timeout` | nothing came back at all | the last motor of the request went quiet, several at once, or the bus is down |
+| `checksum` | a reply arrived corrupted | electrical noise, or a baud rate the wiring cannot carry |
+| `parsing` | a reply arrived structurally impossible | same, further along |
+| `malformed` | the reply decoded to the wrong width | a stuffed frame our decoder could not undo |
+| `retries` | a fused read fell back to three separate typed reads | follows a `malformed`, costs latency, not data |
+| `loop` | the scheduler's own read retries | one per tick that lost its state entirely |
+
+Read the shape, not just the count. **One motor accounting for nearly every fault** is
+physical — its connector, its wire, or its position in the daisy chain; swap it with a
+neighbour and see whether the fault follows the motor or stays at the position. **Faults
+spread evenly over all nineteen** are systemic — try `MICROBAN_BAUD=1000000` to see whether
+the loss disappears at half the rate, and check the supply under load with `u`.
+
+`silent` names a motor because the protocol makes it recoverable: replies come back in the
+order they were requested, so a reply bearing the wrong id says both who stayed quiet and
+who answered in their place. `timeout`, `checksum` and `parsing` fail before any id is
+known, and are counted as unattributed. Running with `MICROBAN_BUS_PROBE=1` pings every
+motor after such a failure to name the silent one — off by default, because it costs
+nineteen extra round trips inside a tick that has already overrun, so use it on the bench
+rather than under a walking policy.
+
 ## Logging a session
 
 Press `l` to start recording, and `l` again to stop. On start you are prompted for an
