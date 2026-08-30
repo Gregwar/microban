@@ -100,8 +100,9 @@ COMMAND_AXIS = {"body vx": "vx", "body vy": "vy", "body vyaw": "vtheta", "odom z
 # distinct from the dashed EMA sharing the same axes.
 COMMAND_STYLE = {"color": "black", "linewidth": 1.2}
 
-# Time constant for that overlay. At 0.75 s it spans a stride or two — long enough to
-# average the within-stride swing away, short enough to still follow a change of command.
+# Time constant for the dashed EMA on the velocity rows. At 0.75 s it spans a stride or two
+# — long enough to average the within-stride swing away, short enough to still follow a
+# change of command.
 VELOCITY_EMA_TAU_S = 0.75
 
 # The squat policy's trunk height target (src/robot_logger.py "command.height"). It is
@@ -120,9 +121,10 @@ class Telemetry(NamedTuple):
     label: str          # checkbox label
     key: str            # channel name in the log
     unit: str           # y-axis unit
-    ema: bool = False   # add a dashed trend line, for channels too noisy to read a level off
     magnitude: bool = False  # plot |value|: the sign is a direction, the magnitude is the load
     total: bool = False  # aggregate by summing the motors rather than averaging them
+    # add a dashed trailing mean, for channels too noisy to read a level off
+    trailing_mean: bool = False
 
 
 TELEMETRY = (
@@ -133,7 +135,9 @@ TELEMETRY = (
     # so every current trace is |I|. The motors draw from one pack, so they are summed:
     # the total is what the battery and the overcurrent safety actually see, and a mean
     # would read 19x lower than OVERCURRENT_CUTOFF_A.
-    Telemetry("current", "current", "A", ema=True, magnitude=True, total=True),
+    # The per-tick draw swings with every stride, so a dashed trailing mean rides on top:
+    # it is what a sustained draw is read off, and what compares against OVERCURRENT_CUTOFF_A.
+    Telemetry("current", "current", "A", magnitude=True, total=True, trailing_mean=True),
 )
 
 # Divergence between exactly two policy-aligned runs: the mean |position| error over the
@@ -146,9 +150,10 @@ MAE_LABEL = "MAE"
 # actually comparing. The integral therefore holds at 0 until the runs have settled.
 MAE_START_S = 2.5
 
-# EMA time constant for that trend line. At ~2 s it averages over several walking cycles,
-# so the dashed line shows the sustained draw rather than the within-stride peaks.
-EMA_TAU_S = 8.0
+# Width of the window that dashed trailing mean averages over. At 3 s it spans a couple of
+# squat or walk cycles, so the line reads as the draw around that moment rather than as the
+# within-cycle swing, while still following a change of gait within a few seconds.
+MEAN_WINDOW_S = 3.0
 
 # Plot area, to the right of the checkbox panel.
 GRID_BOX = {"left": 0.27, "right": 0.97, "top": 0.9, "bottom": 0.08}
@@ -369,7 +374,50 @@ def channel_stats(
     return mean, lo, hi, total
 
 
-def ema(times: list[float], values: list[float], tau_s: float = EMA_TAU_S) -> list[float]:
+def trailing_mean(
+    times: list[float], values: list[float], window_s: float = MEAN_WINDOW_S
+) -> list[float]:
+    """`values` averaged over the `window_s` of `times` ending at each of `times`.
+
+    Trailing rather than centred: the line at `t` is built only from what had already
+    happened by `t`, so it never moves ahead of the event that caused it. Over the first
+    `window_s` of the log the window is simply truncated, so those points average over less
+    data.
+
+    The window is set in seconds and the samples inside it are counted, so the curve does
+    not change with the log rate. NaN samples are left out of both the sum and the count —
+    a dropped read shortens the average instead of poisoning the whole window — and a
+    window holding nothing but gaps comes back NaN.
+
+    `times` must be ascending, which log time is: the window is tracked with two indices
+    walking forward once, rather than rescanned at every tick.
+    """
+    out: list[float] = []
+    lo = hi = 0
+    total = 0.0
+    count = 0
+
+    for t in times:
+        while hi < len(times) and times[hi] <= t:
+            v = values[hi]
+            if v == v:
+                total += v
+                count += 1
+            hi += 1
+        while times[lo] < t - window_s:
+            v = values[lo]
+            if v == v:
+                total -= v
+                count -= 1
+            lo += 1
+        out.append(total / count if count else float("nan"))
+
+    return out
+
+
+def ema(
+    times: list[float], values: list[float], tau_s: float = VELOCITY_EMA_TAU_S
+) -> list[float]:
     """Exponential moving average of `values`, sampled at `times`.
 
     Uses alpha = 1 - exp(-dt/tau) rather than a fixed weight, so the smoothing is set by
@@ -577,6 +625,9 @@ def build_figure(entries: list[tuple[Path, dict]], odometry: list[list] | None =
             for row, label in enumerate(selected):
                 is_joint = label in joints
                 row_axes = []
+                # Rows that carry a legend of their own; the per-log legend below would
+                # silently replace it, since a matplotlib axis holds exactly one.
+                own_legend = False
 
                 if is_joint:
                     ax_pos = fig.add_subplot(grid[row, 0], sharex=shared)
@@ -632,24 +683,39 @@ def build_figure(entries: list[tuple[Path, dict]], odometry: list[list] | None =
                                 times[i], lo, hi, color=colors[i], alpha=0.2, linewidth=0
                             )
                         ax.plot(times[i], aggregate, **read_style(i))
-                        if tel.ema:
+                        if tel.trailing_mean:
                             ax.plot(
-                                times[i], ema(times[i], aggregate),
+                                times[i], trailing_mean(times[i], aggregate),
                                 color=colors[i], linestyle="--", linewidth=1.6,
                             )
 
                     name = f"|{label}|" if tel.magnitude else label
                     name = f"Σ {name}" if tel.total else name
                     ax.set_ylabel(f"{name} ({tel.unit})", fontsize=9)
-                    if tel.ema:
+                    if tel.trailing_mean:
+                        # This legend stands in for the per-log one below, so with several
+                        # logs it still has to say which colour is which run; the dashed
+                        # sample is then drawn in neutral grey, since it belongs to all of
+                        # them. Solo, there is no ambiguity and the solid line can instead
+                        # spell out what the aggregate is.
+                        own_legend = True
                         summary = "sum over motors" if tel.total else "mean across motors"
+                        if solo:
+                            handles = [plt.Line2D([], [], color=colors[0], linewidth=1.0)]
+                            legend_names = [summary]
+                            dashed = colors[0]
+                        else:
+                            handles = [
+                                plt.Line2D([], [], **read_style(i)) for i in range(len(entries))
+                            ]
+                            legend_names = [path.stem for path, _ in entries]
+                            dashed = "0.4"
+                        handles.append(
+                            plt.Line2D([], [], color=dashed, linestyle="--", linewidth=1.6)
+                        )
+                        legend_names.append(f"mean over {MEAN_WINDOW_S:g} s")
                         ax.legend(
-                            handles=[
-                                plt.Line2D([], [], color=colors[0], linewidth=1.0),
-                                plt.Line2D([], [], color=colors[0], linestyle="--", linewidth=1.6),
-                            ],
-                            labels=[summary, f"EMA ({EMA_TAU_S:.0f} s)"],
-                            loc="upper right", fontsize=8,
+                            handles=handles, labels=legend_names, loc="upper right", fontsize=8
                         )
                 elif label == MAE_LABEL:
                     # One curve for the pair, not one per log, so it takes the full width.
@@ -660,6 +726,7 @@ def build_figure(entries: list[tuple[Path, dict]], odometry: list[list] | None =
                     ax.plot(times[0], mae, color=SOLO_GOAL_COLOR, linewidth=1.2)
                     ax.axvline(MAE_START_S, color="0.6", linestyle=":", linewidth=0.8)
                     ax.set_ylabel("mean MAE (rad)", fontsize=9)
+                    own_legend = True
                     ax.legend(
                         handles=[plt.Line2D([], [], color=SOLO_GOAL_COLOR, linewidth=1.2)],
                         labels=[
@@ -705,6 +772,7 @@ def build_figure(entries: list[tuple[Path, dict]], odometry: list[list] | None =
                         if commanded:
                             handles.append(plt.Line2D([], [], **COMMAND_STYLE))
                             legend_names.append("command")
+                        own_legend = True
                         ax.legend(
                             handles=handles, labels=legend_names, loc="upper right", fontsize=8
                         )
@@ -717,10 +785,9 @@ def build_figure(entries: list[tuple[Path, dict]], odometry: list[list] | None =
                     if aligned and not solo:
                         ax.axvline(0.0, color="0.6", linewidth=0.8, zorder=0)
 
-                # The MAE row and the EMA-overlaid velocity rows carry legends of their own,
-                # which a per-log one would silently replace (a matplotlib axis holds one).
-                # On those rows the log colours are still readable from the joint rows.
-                if row == 0 and label != MAE_LABEL and label not in EMA_TRACES:
+                # On a row that already legends itself the log colours are still readable
+                # from the joint rows, so the per-log legend is simply dropped there.
+                if row == 0 and not own_legend:
                     first = row_axes[0]
                     if solo and is_joint:
                         handles = [plt.Line2D([], [], **goal_style(0)), plt.Line2D([], [], **read_style(0))]

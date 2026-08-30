@@ -1,4 +1,4 @@
-.PHONY: sync setup run stop shutdown voltage imu imu-delay sim viewer get-logs check-read set-baud gamepad-headless-enable gamepad-headless-disable
+.PHONY: sync setup run stop shutdown voltage imu imu-delay sim viewer get-logs check-read check-motors set-baud gamepad-headless-enable gamepad-headless-disable
 
 HOST ?= microban
 ID ?=
@@ -71,6 +71,12 @@ imu-delay: sync
 # Read-only (no torque, no goal writes) — leave the robot still on the bench.
 check-read: sync
 	ssh -tt $(HOST) "bash -l -c 'cd microban && PYTHONPATH=src .venv/bin/python src/check_read.py'"
+
+# Audit the motors: who answers, and does their EEPROM match the setup checklist.
+# Strictly read-only (no torque, no goals, not even the LED) — safe on the bench.
+#   make check-motors ID=24 ARGS="--verbose --full-scan"
+check-motors: sync
+	ssh -tt $(HOST) "bash -l -c 'cd microban && PYTHONPATH=src .venv/bin/python src/check_motors.py $(ID) $(ARGS)'"
 
 # Change the motor bus rate: `make set-baud BAUD=2000000` (or 1000000 to go back).
 # Writes EEPROM — read src/set_baud.py before running. Update MOTOR_BAUDRATE afterwards.

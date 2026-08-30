@@ -36,6 +36,11 @@ class PlacoViewerController:
         self._last_angles: dict[str, float] = dict(NEUTRAL_POSE)
         self._dt = dt
 
+    def get_log_metadata(self) -> dict:
+        """Identify a log as coming from the kinematic viewer: it displays the commanded
+        pose, with no physics and no actuator model behind it."""
+        return {"source": "kinematic viewer"}
+
     def sync_write_goal_position(self, ids: list[int], positions: list[float]) -> None:
         for motor_id, pos in zip(ids, positions):
             self._current_angles[ID_TO_MOTOR[motor_id]] = pos

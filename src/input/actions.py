@@ -25,8 +25,11 @@ VELOCITY_MAX = 1.0
 
 # Which moves can be toggled, and what toggles them. Single source of truth: change a
 # binding here and both the robot and the simulation follow.
+# [r] is also the MuJoCo viewer's reset key, but that one is read by SimDebugKeys from the
+# viewer window while this table is read from the terminal, so the two never collide.
 MOVE_KEYS = {
     "h": "head", "s": "squat", "v": "walk", "z": "squat_rl", "g": "getup", "b": "benchmark",
+    "f": "leftstand", "r": "released",
 }
 GAMEPAD_BUTTON_MOVES = {"A": "walk"}
 

@@ -364,11 +364,21 @@ class Scheduler:
                 return move.height_target_command
         return None
 
+    def _log_source(self) -> dict:
+        """What the log should say produced it, asked of the controller.
+
+        A controller that does not answer leaves the source "unknown" rather than being
+        assumed real: a log wrongly stamped "robot" is worse than one that admits it does
+        not know.
+        """
+        getter = getattr(self.controller, "get_log_metadata", None)
+        return getter() if callable(getter) else {"source": "unknown"}
+
     def _update_logging(self, obs: Observation, command: MotorCommand) -> None:
         """Start, feed or stop the log session to follow the [l] toggle."""
         if obs.user_input.logging:
             if not self.logger.active:
-                path = self.logger.start(obs.user_input.log_name)
+                path = self.logger.start(obs.user_input.log_name, self._log_source())
                 print(f"Logging to {path}", end="\r\n", flush=True)
             self.logger.record(
                 obs.robot_state,

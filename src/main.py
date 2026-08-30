@@ -15,6 +15,8 @@ from moves.rotate_head import RotateHeadMove
 from moves.squat import SquatMove
 from moves.squat_rl import SquatRlMove
 from moves.getup import GetupMove
+from moves.leftstand import LeftStandMove
+from moves.released import ReleasedMove
 from moves.walk import WalkMove
 
 PID_FILE = Path("/tmp/microban_scheduler.pid")
@@ -79,7 +81,11 @@ def main() -> None:
                 "squat": SquatMove(controller=controller),
                 "squat_rl": SquatRlMove(controller=controller),
                 "getup": GetupMove(controller=controller),
+                "leftstand": LeftStandMove(controller=controller),
                 "walk": WalkMove(controller=controller),
+                # Last on purpose: moves are dispatched in this order, so "released" is
+                # what overrides a policy still active alongside it.
+                "released": ReleasedMove(controller=controller),
             },
         )
 

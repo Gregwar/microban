@@ -51,6 +51,7 @@ class RobotLogger:
         self._path: Path | None = None
         self._t0: float = 0.0
         self._started_at: str = ""
+        self._source: dict = {}
         self._samples: dict = {}
         self._policy_t0: float | None = None
         self._policy_name: str | None = None
@@ -59,8 +60,13 @@ class RobotLogger:
     def active(self) -> bool:
         return self._path is not None
 
-    def start(self, name: str = "") -> Path:
-        """Open a session. `name` is an optional suffix appended to the date stamp."""
+    def start(self, name: str = "", source: dict | None = None) -> Path:
+        """Open a session.
+
+        `name` is an optional suffix appended to the date stamp. `source` describes what
+        produced the samples — the controller answers it (ControllerProtocol.get_log_metadata)
+        and its keys are copied verbatim into the file's metadata block.
+        """
         now = datetime.now()
         suffix = sanitize_name(name)
         stem = now.strftime("%Y-%m-%d_%H-%M-%S") + (f"_{suffix}" if suffix else "")
@@ -68,6 +74,7 @@ class RobotLogger:
         self._log_dir.mkdir(parents=True, exist_ok=True)
         self._path = self._log_dir / f"{stem}.json"
         self._started_at = now.isoformat(timespec="seconds")
+        self._source = dict(source or {})
         self._t0 = time.perf_counter()
         self._policy_t0 = None
         self._policy_name = None
@@ -87,7 +94,7 @@ class RobotLogger:
             # that yields the robot's roll/pitch.
             "body_quat": {axis: [] for axis in ("w", "x", "y", "z")},
             # Command fed to the policies: the velocity axes, plus the trunk height target
-            # a height-tracking policy (squat_rl) is following. "height" is null on ticks
+            # a height-tracking policy is following. "height" is null on ticks
             # where no move commanded one, so a 0 there always means a real 0 m command.
             "command": {axis: [] for axis in ("vx", "vy", "vtheta", "height")},
         }
@@ -163,6 +170,12 @@ class RobotLogger:
         payload = {
             "metadata": {
                 "started_at": self._started_at,
+                # What produced the samples: "source" is "robot", "simulation" or
+                # "kinematic viewer", and a simulated run adds the bam actuator model it
+                # ran on (bam_motor / bam_model). Written by the controller rather than
+                # guessed here, so a log always says where it came from — a sim log and a
+                # robot log are otherwise indistinguishable once on disk.
+                **self._source,
                 "duration_s": round(time.perf_counter() - self._t0, 3),
                 "ticks": len(self._samples["time"]),
                 # Seconds into the log at which a policy went active, or null if none did.
@@ -172,6 +185,7 @@ class RobotLogger:
             **self._samples,
         }
         self._path = None
+        self._source = {}
         self._samples = {}
 
         path.write_text(json.dumps(payload, indent=2), encoding="utf-8")

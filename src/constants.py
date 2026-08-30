@@ -77,10 +77,13 @@ KP_RL: int = 125             # ~0.277 Nm/rad in MuJoCo
 KP_GAIN_PRM: float = 0.0022  # Nm/rad per register unit (for Xl330)
 
 # BAM motor model (bam package, XL330 m6)
-BAM_VIN: float = 7.8
+BAM_VIN: float = 7.7
 BAM_VIN_MIN: float = 6.0
 BAM_VOLTAGE_DROP_RESISTANCE: float = 0.5
 BAM_MAX_CURRENT: float = 1.75 # XL330 firmware current limit [A]: clips motor torque to ±BAM_MAX_CURRENT * kt
+STANDBY_CURRENT: float = 0.010 # Doc says 17mA but motor reports more like 10mA
+
+# STANDBYE_CURRENT: float = 0.010 # Doc says 17mA but motor reports more like 
 
 # Overcurrent safety: emergency torque-off when the summed |present_current| of all
 # motors stays above OVERCURRENT_CUTOFF_A for OVERCURRENT_DEBOUNCE_TICKS consecutive ticks.

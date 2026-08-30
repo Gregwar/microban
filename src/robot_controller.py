@@ -306,6 +306,10 @@ class RobotController:
         voltages = self.sync_read_present_input_voltage(ids) if include_voltage else []
         return positions, velocities, currents, voltages
 
+    def get_log_metadata(self) -> dict:
+        """Identify a log as coming from the real robot (see ControllerProtocol)."""
+        return {"source": "robot"}
+
     def sync_write_torque_enable(self, ids: list[int], values: list[bool]) -> None:
         self._write(self._controller.sync_write_torque_enable, ids, values)
 

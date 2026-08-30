@@ -12,39 +12,39 @@ from observer import Observation
 from moves.move import MotorCommand, Move, MoveState, onnx_run_name
 
 # Policy name
-AGENT_NAME = "squat_m6_45.onnx"
+AGENT_NAME = "leftstand_m6.onnx"
 
-# Squat clock. This policy does not track a trunk height: it tracks a placo-generated
-# squat reference — the same motion src/moves/squat.py runs — and the only thing it is
-# told is where it is in that cycle:
+# Single-leg clock. Like the squat reference policy, this one is not given a pose target
+# but a position in a cycle:
 #
-#     phase = 2*pi*SQUAT_FREQUENCY*t,   command = [cos(phase), sin(phase)]
+#     phase = 2*pi*t/LEFTSTAND_CYCLE_S,   command = [cos(phase), sin(phase)]
 #
-# The depth and the posture of the squat therefore come from the reference the policy
-# learned, not from anything set here; the frequency only says how fast to play it, and
-# it MUST match the clip the policy was trained against (one full period sampled at the
-# 50 Hz control rate, mjlab_microban/scripts/make_squat_reference.py FREQUENCY = 0.25 Hz).
-# Phase 0 is the top of the squat, where the reference sits at the home pose — which is
-# why the clock restarts at every activation instead of free-running.
-SQUAT_FREQUENCY = 0.25  # Hz
+# so the move loops — lift the right foot, stand on the left, put it back down, again —
+# for as long as it is active, instead of rising once and holding there. What the robot
+# does at each point of that cycle comes from the reference the policy was trained on;
+# the period here only says how fast to play it, and it MUST match the length of that
+# reference clip (6 s, i.e. 300 frames at the 50 Hz control rate). Phase 0 is the first
+# frame of the clip, and the clock restarts at every activation so the loop always begins
+# there rather than dropping in wherever a free-running phase happens to be.
+LEFTSTAND_CYCLE_S = 6.0  # seconds per lift/lower cycle
 
 # gyro(3) + projected gravity(3) + joint pos/vel/last action(3 * 18) + phase(2).
 _OBSERVATION_SIZE = 3 + 3 + 3 * len(OBSERVATION_DOF_ORDER) + 2
 
 
-class SquatRlMove(Move):
-    """Squat using an RL policy trained in simulation.
+class LeftStandMove(Move):
+    """Balance on the left foot using an RL policy trained in simulation.
 
-    Environment: mjlab_microban/tasks/microban_squatref_env_cfg.py
-    (``Mjlab-SquatRef-Microban``). The observation is gyro(3) + projected gravity(3) +
-    joint_pos(18) + joint_vel(18) + last action(18) + phase(2) = 62, and the 18 actions
-    are joint offsets from the reference pose for every joint except the head — which
-    this move therefore leaves at neutral.
+    Environment: the single-leg reference task of mjlab_microban (the policy's ONNX
+    metadata names its command ``leftstand_ref``). The robot cycles between double
+    support and standing on its *left* foot with the right one lifted; the observation is
+    gyro(3) + projected gravity(3) + joint_pos(18) + joint_vel(18) + last action(18) +
+    phase(2) = 62, and the 18 actions are joint offsets from the reference pose for every
+    joint except the head — which this move therefore leaves at neutral.
 
-    Note the observation is *not* the one the older ``Mjlab-Squat-Microban`` policies
-    take (61, ending in a trunk-height target): a policy trained on that task cannot be
-    driven by this move, and the size check in ``__init__`` refuses it rather than
-    letting it run on a silently wrong last observation.
+    The policy commands no trunk height (its whole command is the phase), so
+    Move.height_target_command stays None and the log's `command.height` channel is null
+    while it runs.
     """
 
     is_policy = True
@@ -58,21 +58,19 @@ class SquatRlMove(Move):
         agent_path = Path(f"src/agents/{AGENT_NAME}")
         if not agent_path.exists():
             raise FileNotFoundError(
-                f"{agent_path} not found. Export one from the squat reference task:\n"
+                f"{agent_path} not found. Export one from the single-leg reference task:\n"
                 "  cd ~/mjlab_microban && uv run python src/mjlab_microban/scripts/export_onnx.py "
-                "--checkpoint logs/rsl_rl/mjlab_microban_squatref/<run>/model_<n>.pt\n"
-                "(the script's TASK must be Mjlab-SquatRef-Microban)"
+                "--checkpoint logs/rsl_rl/<leftstand run>/model_<n>.pt"
             )
         self._ort_session = ort.InferenceSession(str(agent_path))
 
-        # Guard against loading a height-tracking squat policy by mistake: both are
-        # called squat_*.onnx, and the only visible difference is the observation size.
         input_size = self._ort_session.get_inputs()[0].shape[1]
         if input_size != _OBSERVATION_SIZE:
             raise ValueError(
                 f"{AGENT_NAME} takes {input_size} observations but this move builds "
-                f"{_OBSERVATION_SIZE}: it is not a Mjlab-SquatRef-Microban policy "
-                "(a height-tracking Mjlab-Squat-Microban one takes 61)."
+                f"{_OBSERVATION_SIZE}: it is not a phase-driven leftstand policy (the "
+                "older two-height Mjlab-LeftStandFoot-Microban one also takes 62 but "
+                "reads its command as [foot height, trunk height])."
             )
 
         self.action_scale = 1.0
@@ -83,21 +81,11 @@ class SquatRlMove(Move):
         positions = [float(v) for v in meta["default_joint_pos"].split(",")]
         self._default_pose: dict[str, float] = dict(zip(names, positions))
 
-        # Phase clock, restarted at each activation so the squat always begins at the top
-        # of the cycle instead of dropping into wherever a free-running phase happens to be.
+        # Phase clock, restarted at each activation (see LEFTSTAND_CYCLE_S).
         self._start_time_s = 0.0
-
-        # Number of full squat cycles completed since activation, used only to report
-        # progress: the phase clock is what drives the policy.
-        self._squat_count = 0
 
         # Safety parameters
         self._projected_gravity_z_threshold = -0.5  # Threshold for detecting a fall based on projected gravity
-
-        # NOTE: Move.height_target_command stays None for this move. The policy is given a
-        # phase, not a height, so there is no commanded trunk height to log — the log's
-        # `command.height` channel is simply null while this squat runs (the reference's
-        # own trunk height lives in the training-side clip, not here).
 
     def describe(self) -> str:
         return onnx_run_name(self._ort_session, AGENT_NAME)
@@ -108,30 +96,22 @@ class SquatRlMove(Move):
             self._controller.sync_write_kp(ids, [KP_RL] * len(ids))
         self._start_time_s = obs.robot_state.time_s
         self._last_action = [0.0] * len(OBSERVATION_DOF_ORDER)
-        self._squat_count = 0
         self.state = MoveState.ACTIVE
 
     def phase(self, obs: Observation) -> float:
-        """Position in the squat cycle [rad] for this tick, 0 at the top of the squat.
+        """Position in the lift cycle [rad] for this tick, 0 at the start of the clip.
 
         Read off the clock rather than counted in ticks (as the training env does, one
         reference row per control step): the loop is real-time, so timing the phase keeps
-        the squat at exactly SQUAT_FREQUENCY even when a tick runs late.
+        the cycle at exactly LEFTSTAND_CYCLE_S even when a tick runs late.
         """
         elapsed_s = obs.robot_state.time_s - self._start_time_s
-        return 2.0 * math.pi * SQUAT_FREQUENCY * elapsed_s
+        return 2.0 * math.pi * elapsed_s / LEFTSTAND_CYCLE_S
 
     def step(self, obs: Observation, command: MotorCommand) -> None:
         # Safety check: if the robot is fallen, stop the policy
         if obs.robot_state.projected_gravity[2] > self._projected_gravity_z_threshold:
             return
-
-        # Report each completed squat: the phase restarts at 0 at the top of the cycle,
-        # so a full squat is done every time it passes another multiple of 2*pi.
-        completed = int(self.phase(obs) / (2.0 * math.pi))
-        if completed > self._squat_count:
-            self._squat_count = completed
-            print(f"{self._squat_count} squat{'s' if self._squat_count > 1 else ''} done\r")
 
         # Run policy
         input_obs = self.build_observation(obs)
@@ -163,7 +143,7 @@ class SquatRlMove(Move):
         # Last action
         input_obs.extend(self._last_action)
 
-        # Command: where in the squat cycle the policy is, as [cos, sin] so the clock has
+        # Command: where in the lift cycle the policy is, as [cos, sin] so the clock has
         # no discontinuity when it wraps.
         phase = self.phase(obs)
         input_obs.append(math.cos(phase))

@@ -47,6 +47,8 @@ by default; add `HOST=microban-ext` to operate over the secondary network (see t
 | `h` | toggle the **head** move |
 | `s` | toggle the **squat** move |
 | `g` | toggle the **getup** move |
+| `f` | toggle the **leftstand** move (loops: lift the right foot, stand on the left, back down) |
+| `r` | toggle the **released** move: cut torque on every motor and let the robot go limp; pressing it again re-enables torque and ramps back to the neutral pose over 2 s |
 | arrows | `vx` (up/down), `vtheta` (left/right) |
 | `x` | reset velocity to zero |
 | `i` | toggle the IMU/gyro display |
@@ -158,9 +160,30 @@ series.
 Quitting with `q` while a session is running still writes the file. Logs stay on the robot
 until you pull them over with `make get-logs`, which copies them into your local `logs/`.
 
-If a policy (`walk`, `squat_rl`, `getup`) goes active during the session, the moment it started is
+If a policy (`walk`, `squat_rl`, `getup`, `leftstand`) goes active during the session, the moment it started is
 recorded as `policy_t0` in the log's metadata. A policy already running when you press `l`
 is not stamped, since its real start time falls outside the log.
+
+The metadata block also says where the samples came from, so a real run and a simulated one
+are told apart once on disk: `source` is `robot` (`make run`), `simulation` (`make sim`, and
+the replays produced by `src/debug/sim_log.py --log`) or `kinematic viewer` (`make viewer`,
+no physics). A simulated log additionally carries the actuator model it ran on —
+`bam_motor` (`xl330`) and `bam_model` (`m1`…`m6`, set by `BAM_MODEL` in
+[mujoco_controller.py](../src/sim/mujoco_controller.py)) — since changing the friction model
+changes the behaviour the log recorded:
+
+```json
+"metadata": {
+  "started_at": "2026-08-29T01:16:54",
+  "source": "simulation",
+  "bam_motor": "xl330",
+  "bam_model": "m5",
+  "duration_s": 12.4,
+  "ticks": 620,
+  "policy_t0": 1.82,
+  "policy": "walk"
+}
+```
 
 To inspect a log, `uv run --group debug src/debug/plot_log.py` plots the newest one (pass a
 path for a specific one). Tick a joint and it gets its own pair of plots — position (goal
@@ -252,8 +275,96 @@ happened — a foot sinking through the floor or hovering above it is the drift 
 For a *physical* replay, where the log's goal positions drive simulated motors, use
 `src/debug/sim_log.py` instead.
 
+### Scoring a squat against its reference
+
+`squat_rl` does not track a height, it tracks a placo-generated squat clip it is handed a
+phase into (`~/mjlab_microban/.../robot/squat_reference.pkl`, replayed at
+`SQUAT_FREQUENCY`). Since the clock is anchored on `policy_t0`, a log is enough to know
+which reference pose the policy was being asked for on every tick, and
+`src/debug/squat_ref_error.py` scores the run against it:
+
+```
+uv run --group debug src/debug/squat_ref_error.py logs/a.json
+uv run --group debug src/debug/squat_ref_error.py logs/a.json logs/b.json --plot
+```
+
+It prints the mean absolute joint error against the clip — the quantity the training reward
+is built on, restated as the reward itself so a run reads on the same scale as the training
+curves — split into what the policy *asked* for (goal vs reference) and what the servos
+*delivered* (read vs goal), then per joint, over the squat cycle, and cycle by cycle. Errors
+are printed in degrees, though everything inside the script (and the reward) stays in
+radians. The error is always measured against the clip as it stands: nothing is shifted in
+time or rescaled first. Three diagnostics say how a run is wrong rather than how much, and
+are reported beside the error rather than removed from it: `lag` (the shift that *would*
+minimise the error, i.e. the robot running behind the clock), `gain` (the amplitude it
+produced over the amplitude it was asked for, weighted by how far each joint travels, so
+< 1 is a squat too shallow) and `bias`.
+
+`--trunk` adds the one thing the joint table cannot show — how deep the robot actually
+squatted, in millimetres. The clip carries its own `trunk_z`, and running the read joint
+angles through `src/model/mjcf/robot.xml` gives the height the robot reached: the trunk
+origin above the lowest sole corner, with the floating base oriented by the logged
+`body_quat` so a leaning robot is still measured vertically. Replaying the clip's own frames
+through that same forward kinematics reproduces its `trunk_z` to 0.06 mm, so the mjlab model
+the clip was generated from and this one agree on where the trunk is. It needs MuJoCo:
+
+```
+uv run --group debug --group sim src/debug/squat_ref_error.py logs/a.json --trunk
+```
+
+Unlike `plot_log.py --odometry` this involves no dead reckoning — height needs the current
+pose only, so nothing drifts. It does assume a sole corner is on the floor, which a
+double-support squat satisfies but a run that lifts a foot does not.
+
+Ticks after the policy stopped are cut — the log usually outlives the move, and the clock
+would otherwise keep turning over a robot standing at home. On
+`logs/2026-08-26_14-56-01_squat_m6_real.json` the m6 policy holds 0.72 deg of mean error
+(reward 0.987) at unity gain and 10 ms of lag, while its m1 counterpart from the same
+session sits at 0.97 deg, most of it in the knees (2.5 deg against m6's 1.3). Both command
+goals ~4.5 deg off the reference, leading the clip by ~200 ms, which the servos' own lag
+then cancels.
+
 > While the name prompt is open, keys are captured by the prompt — `Ctrl+C` still stops
 > the control loop if you need it.
+
+### Checking the current model
+
+`src/debug/plot_current_model.py` asks the opposite question of the two above: not what the
+robot did, but whether the motor model knows what it costs. It replays the bam XL330
+firmware + motor model over a log's own data — the commanded target, the read position and
+the read velocity of every tick — and plots the current it predicts against the `current`
+the servos actually reported, so the log has to have been recorded with `[u]` on. Nothing is
+simulated: the model is evaluated open loop on recorded state, so what the figure shows is
+the model being wrong rather than a trajectory that drifted apart.
+
+```
+uv run --group debug --group sim src/debug/plot_current_model.py logs/a.json --model m6
+uv run --group debug --group sim src/debug/plot_current_model.py logs/a.json --model m1 m6
+```
+
+The variant is chosen at runtime (`--model m1` … `m6`, several allowed, one curve each).
+They differ in their friction terms, which do not enter the current equation, but each
+carries its own fitted `kt` and `R`, which do. The firmware gain is not in the log, so it is
+reconstructed from the policy name and `policy_t0` (`KP_DEFAULT` until the policy starts,
+`KP_RL` after) unless `--kp` forces one; the supply voltage comes from the logged reading
+unless `--vin` does. `--current phase` swaps the servo-reported bus current for the winding
+current the overcurrent proxy in `src/scheduler.py` uses.
+
+Two figures come out: the pack total measured against each model with the error underneath
+as a sliding-window MAE, and one panel per joint. On
+`logs/2026-08-26_16-50-29_squat_m2_real.json` m6 reproduces the shape and the timing of the
+squat cycle but reads 0.19 A against 0.36 A measured, and the per-joint panels say why: on
+the loaded joints it lands (the knees carry 48 and 89 mA, predicted 37 and 98), while every
+unloaded joint sits at a steady 6–17 mA the model has no term for. Those joints are 0.14 A
+of the 0.17 A gap — a per-servo standby draw, not a friction parameter. A log of the robot
+lying idle (`logs/2026-08-26_15-16-01_idle_lying.json`) is the clean version of the same
+thing: 0.137 A measured against 0.009 A predicted, all of it standby.
+
+One thing it cannot see. The firmware closes its loop at a few kHz while the log only holds
+the error at the top of each 20 ms tick, which is the largest error of the tick, so the duty
+cycle is an upper bound. Running it on a *sim* log measures exactly that: the same bam model
+is on both sides, and what is left (~2.5x on the bus current of a squat) is the cost of
+evaluating it once per tick rather than every physics step.
 
 ## Controlling with a gamepad
 

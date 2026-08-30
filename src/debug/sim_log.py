@@ -95,7 +95,9 @@ def replay(log: dict, view: bool, log_name: str | None, settle_time: float) -> N
         # live run with [u] on would — otherwise they would be null throughout.
         observer.observe_voltage = True
         observer.observe_current = True
-        path = logger.start(log_name)
+        # Stamped as simulated, with the bam model behind it: a replay log is meant to be
+        # overlaid on the real one it came from, so the file has to say which is which.
+        path = logger.start(log_name, controller.get_log_metadata())
         print(f"Logging replay to {path}")
 
     print(

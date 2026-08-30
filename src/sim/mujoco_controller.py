@@ -17,7 +17,7 @@ if TYPE_CHECKING:
 from bam.model import load_model as bam_load_model
 from bam.mujoco import MujocoController as BamController
 
-from constants import MOTOR_TO_ID, ID_TO_MOTOR, NEUTRAL_POSE, KP_DEFAULT, BAM_VIN, BAM_VOLTAGE_DROP_RESISTANCE, BAM_VIN_MIN, BAM_MAX_CURRENT
+from constants import MOTOR_TO_ID, ID_TO_MOTOR, NEUTRAL_POSE, KP_DEFAULT, BAM_VIN, BAM_VOLTAGE_DROP_RESISTANCE, BAM_VIN_MIN, BAM_MAX_CURRENT, STANDBY_CURRENT
 
 
 # Trunk height to spawn at. In the neutral pose the feet just graze the floor at 0.1727 m,
@@ -33,6 +33,14 @@ VELOCITY_FD_DT: float = 0.050
 # Extra solver pass that removes residual tangential drift at contacts. MuJoCo's default
 # is 0 (disabled).
 NOSLIP_ITERATIONS: int = 1
+
+# Bundled bam parameter set the actuators run on: which motor was identified, and which of
+# the m1..m6 friction models was fitted to it (m5 = Stribeck, load-dependent, directional).
+# Changing it changes how the simulated robot behaves, so it is stamped into every simulated
+# log's metadata (get_log_metadata) — otherwise two logs recorded under different models are
+# indistinguishable once on disk.
+BAM_MOTOR: str = "xl330"
+BAM_MODEL: str = "m6"
 
 
 class _DelayBuffer:
@@ -110,11 +118,11 @@ class MuJoCoController:
             self._model.body_ipos[trunk_id, 1] += trunk_com_offset[1]
             self._model.body_ipos[trunk_id, 2] += trunk_com_offset[2]
 
-        # BAM motor model — XL330 m6 (DC motor + Stribeck + load-dependent friction)
+        # BAM motor model — see BAM_MOTOR / BAM_MODEL (DC motor + friction).
         # Built before the pose is set: its constructor calls mj_setConst(), which resets
         # the data back to qpos0. Set the pose first and it silently lands at the origin,
         # buried in the floor, and the contact solver ejects it on the first step.
-        bam_model = bam_load_model(motor_name="xl330", model="m6")
+        bam_model = bam_load_model(motor_name=BAM_MOTOR, model=BAM_MODEL)
         bam_model.actuator.kp = KP_DEFAULT
         bam_model.actuator.vin = BAM_VIN
         self._bam = BamController(
@@ -303,13 +311,25 @@ class MuJoCoController:
         duty_cycle = getattr(self._bam.model.actuator, "duty_cycle", None)
         if duty_cycle is None:  # no control step has run yet
             return 0.0
-        return float(duty_cycle[self._bam.dof_to_q_target[motor_name]]) * phase_current
+        return STANDBY_CURRENT + float(duty_cycle[self._bam.dof_to_q_target[motor_name]]) * phase_current
 
     def sync_read_present_current(self, ids: list[int]) -> list[float]:
         # Bus current, not phase current — see _bus_current. Both ctrl (the current-clipped
         # torque set by the last MujocoController.update()) and duty_cycle come from that
         # same update, so they pair up.
         return [self._bus_current(ID_TO_MOTOR[mid]) for mid in ids]
+
+    def get_log_metadata(self) -> dict:
+        """Identify a log as simulated, and say which bam actuator model produced it.
+
+        The model name is read back off the loaded object rather than from BAM_MODEL, so the
+        log reports what bam actually loaded and cannot drift from it.
+        """
+        return {
+            "source": "simulation",
+            "bam_motor": BAM_MOTOR,
+            "bam_model": self._bam.model.name,
+        }
 
     def _sample_effective_vin(self) -> None:
         """Recompute the supply voltage bam is about to apply, just before it consumes it.

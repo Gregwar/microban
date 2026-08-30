@@ -22,8 +22,19 @@ LOGGING = False
 # if the drift flips direction, the bias is in the policy.
 MIRROR = False
 
+# Frequency (Hz) of the reference gait phase, for policies trained with the
+# "reference_phase" observation (detected from the "observation_names" list in the
+# ONNX metadata). [cos, sin] of the phase is appended to the observation; the phase
+# advances while a velocity is commanded and rewinds to 0 when standing, matching
+# the ReferenceCommand behaviour in training.
+PHASE_FREQUENCY = 1.5
+
+# Frequency (Hz) of the control loop stepping this move (see Scheduler); used to
+# convert PHASE_FREQUENCY into a per-tick phase increment.
+CONTROL_FREQUENCY = 50.0
+
 # Policy name
-AGENT_NAME = "walk_m6_l1.onnx"
+AGENT_NAME = "walk_phase.onnx"
 
 
 class WalkMove(Move):
@@ -47,13 +58,12 @@ class WalkMove(Move):
         positions = [float(v) for v in meta["default_joint_pos"].split(",")]
         self._default_pose: dict[str, float] = dict(zip(names, positions))
 
-        # Detect reference phase from model input size:
-        # base_obs = gyro(3) + proj_grav(3) + pos(N) + vel(N) + action(N) + cmd(3)
-        # phase_obs = base_obs + phase(2)
-        base_obs_size = 3 + 3 + 3 * len(OBSERVATION_DOF_ORDER) + 3
-        self._use_reference_phase: bool = self._ort_session.get_inputs()[0].shape[1] > base_obs_size
-        self._phase_step = 0
-        self._phase_total_steps = 20
+        # Detect the reference-phase observation from the ONNX metadata: exports list
+        # their observation terms in "observation_names", and phase-aware policies
+        # include a trailing "reference_phase" term ([cos, sin] of the gait phase).
+        observation_names = meta.get("observation_names", "").split(",")
+        self._use_reference_phase: bool = "reference_phase" in observation_names
+        self._phase = 0.0  # gait phase in radians, in [0, 2*pi)
 
         # Mirror (sagittal reflection) support: precompute, for each joint in
         # OBSERVATION_DOF_ORDER, its left/right partner index and the sign it picks up
@@ -119,13 +129,14 @@ class WalkMove(Move):
         self.state = MoveState.ACTIVE
 
     def step(self, obs: Observation, command: MotorCommand) -> None:
-        # Update reference phase
+        # Update reference phase: advance at PHASE_FREQUENCY while a velocity is
+        # commanded, rewind to 0 when standing (mirrors ReferenceCommand in training).
         if self._use_reference_phase:
             commanded_vel = np.mean([np.abs(obs.user_input.velocity["vx"]), np.abs(obs.user_input.velocity["vy"]), np.abs(obs.user_input.velocity["vtheta"])])
             if commanded_vel > 0.01:
-                self._phase_step += 1
+                self._phase = (self._phase + 2 * np.pi * PHASE_FREQUENCY / CONTROL_FREQUENCY) % (2 * np.pi)
             else:
-                self._phase_step = 0
+                self._phase = 0.0
 
         # Safety check: if the robot is fallen, stop the policy
         if obs.robot_state.projected_gravity[2] > self._projected_gravity_z_threshold:
@@ -225,9 +236,9 @@ class WalkMove(Move):
         input_obs.extend(self._last_action)
         input_obs.extend([vx, vy, vtheta])
 
-        # Reference phase
+        # Reference phase, observed as [cos, sin]
         if self._use_reference_phase:
-            reference_phase = (self._phase_step % self._phase_total_steps) / self._phase_total_steps * 2 * np.pi
+            reference_phase = self._phase
             if mirror:
                 # Mirroring swaps the stance/swing legs, i.e. a half-cycle phase shift.
                 reference_phase += np.pi
