@@ -27,6 +27,7 @@ from observer import Observer, Observation
 from input.input_source import InputSource, UserInput, scale_velocity
 from moves.move import MotorCommand, Move, MoveState
 from robot_logger import RobotLogger
+from state_publisher import DEFAULT_PORT as STATE_PORT, StatePublisher
 
 # How often the [p] timing report is printed. Averaging over a window beats printing every
 # tick: at 50 Hz that would flood the terminal, and the I/O would distort what it measures.
@@ -44,6 +45,9 @@ class Scheduler:
         stop_flag_path: str = "/tmp/microban_scheduler.stop",
         input_source: Optional[InputSource] = None,
         moves: Optional[dict[str, Move]] = None,
+        # TCP port the robot state is broadcast on every tick, for `make viewer [hostname]`
+        # (see src/state_publisher.py). None disables the broadcast.
+        publish_port: Optional[int] = STATE_PORT,
     ):
         self.dt = 1.0 / frequency_hz
         self.controller = controller
@@ -53,6 +57,14 @@ class Scheduler:
 
         self.observer = Observer(self.controller)
         self.logger = RobotLogger()
+        # A port already taken (another loop on this machine) disables the broadcast with a
+        # warning rather than refusing to start: the control loop does not depend on it.
+        self.publisher: Optional[StatePublisher] = None
+        if publish_port is not None:
+            try:
+                self.publisher = StatePublisher(publish_port)
+            except Exception as exc:
+                print(f"Warning: state publisher disabled ({exc})", end="\r\n", flush=True)
         # Name of a policy that went active this tick, consumed by _update_logging (which
         # runs later in the tick, once the logger has had a chance to start).
         self._policy_started: str | None = None
@@ -86,6 +98,12 @@ class Scheduler:
 
     def run(self):
         print(f"Starting control loop at {1 / self.dt:.1f} Hz", end="\r\n", flush=True)
+        if self.publisher is not None:
+            print(
+                f"Publishing the robot state on port {self.publisher.port} (make viewer [hostname])",
+                end="\r\n",
+                flush=True,
+            )
         if self.stop_flag_path.exists():
             self.stop_flag_path.unlink()
 
@@ -169,6 +187,10 @@ class Scheduler:
                 send_s = time.perf_counter() - send_start
 
                 self._update_logging(obs, command)
+                if self.publisher is not None:
+                    self.publisher.publish(
+                        robot_state, command.target_angles, user_input, self._log_source()
+                    )
 
                 # Sampled before the displays below, so the report measures the control
                 # work rather than the cost of reporting it.
@@ -413,6 +435,9 @@ class Scheduler:
 
         if self.input_source:
             self.input_source.stop()
+
+        if self.publisher is not None:
+            self.publisher.close()
 
         shutdown = getattr(self.controller, "shutdown", None)
         if callable(shutdown):

@@ -28,6 +28,13 @@ Typical use is offline, replaying a recorded session log:
     from odometry import replay_log
     samples = replay_log(json.loads(Path("logs/run.json").read_text()))
     print(samples[-1].T_world_trunk[:3, 3])   # where the robot ended up
+
+or live, feeding the ticks as they arrive (src/debug/live_viewer.py does this with the
+state the scheduler publishes over ZeroMQ, see src/state_publisher.py):
+
+    tracker = OdometryTracker()
+    for tick in stream:
+        samples = tracker.push(tick.t, tick.position, tick.velocity, tick.body_quat, tick.gyro)
 """
 
 from dataclasses import dataclass, field
@@ -280,6 +287,10 @@ class OdometrySample:
     support_frame: str
     support_side: str
     joints: dict[str, float] = field(default_factory=dict)
+    # World position of the anchor (the support frame), which placo keeps flat on the
+    # floor. It jumps to a new corner at every transfer, so drawing it shows the odometry
+    # step happening — see src/debug/odometry_view.py.
+    support_position: np.ndarray | None = None
 
     @property
     def position(self) -> np.ndarray:
@@ -288,6 +299,121 @@ class OdometrySample:
     @property
     def yaw(self) -> float:
         return yaw_of(self.T_world_trunk[:3, :3])
+
+
+def _make_sample(odometry: Odometry, t: float, joints: dict[str, float]) -> OdometrySample:
+    """Snapshot the estimator's current state as a sample — copies, since it moves on."""
+    return OdometrySample(
+        t=float(t),
+        T_world_trunk=odometry.T_world_trunk.copy(),
+        body_velocity=odometry.body_velocity.copy(),
+        world_velocity=odometry.world_velocity,
+        omega_trunk=odometry.omega_trunk,
+        support_frame=odometry.support_frame,
+        support_side=odometry.support_side,
+        joints=dict(joints),
+        support_position=odometry.robot.get_T_world_frame(odometry.support_frame)[:3, 3].copy(),
+    )
+
+
+class OdometryTracker:
+    """The odometry fed live, one tick at a time, on the same fine grid as `replay_log`.
+
+    The anchor transfer is only noticed between estimator steps, so stepping it once per
+    50 Hz tick bakes up to 20 ms of foot travel into every transfer (see ODOMETRY_DT for
+    the numbers). `replay_log` avoids that by interpolating the whole log onto a `dt` grid
+    first; this does the same thing incrementally: every tick pushed is linearly
+    interpolated from the previous one onto the grid points that fall in between, and the
+    estimator is stepped on each of them. The samples produced by a push are returned, so a
+    50 Hz stream comes out as a 200 Hz estimate — the last one is the current pose.
+
+    The first tick (and any tick whose clock went backwards, i.e. the source restarted)
+    re-plants the robot at the world origin.
+    """
+
+    def __init__(self, model_path: str = DEFAULT_MODEL_PATH, dt: float = ODOMETRY_DT) -> None:
+        if dt <= 0.0:
+            raise ValueError(f"dt must be positive, got {dt}.")
+        self.odometry = Odometry(model_path)
+        self.dt = dt
+        self.names: list[str] = list(MOTOR_TO_ID)
+        self._last: tuple[float, np.ndarray, np.ndarray, np.ndarray, np.ndarray] | None = None
+        self._next_t = 0.0
+
+    @property
+    def started(self) -> bool:
+        return self._last is not None
+
+    def reset(self) -> None:
+        """Forget the integrated state: the next tick re-plants the robot at the origin."""
+        self._last = None
+
+    def push(
+        self,
+        t: float,
+        joints: dict[str, float],
+        joint_velocities: dict[str, float] | None,
+        body_quat,
+        gyro,
+    ) -> list[OdometrySample]:
+        """Feed one tick of measurements; returns the samples it produced (possibly none).
+
+        `body_quat` is the attitude in the trunk frame (w, x, y, z) and `gyro` the raw
+        IMU reading, exactly the `body_quat` / `gyro` log channels. Either may be None or
+        empty when the IMU read failed on that tick: the attitude is then held from the
+        previous tick and the gyro taken as zero — and before the first valid attitude
+        there is nothing to estimate from, so such ticks are dropped.
+        """
+        q = np.array([float(v) for v in body_quat], dtype=float) if body_quat else None
+        if q is None:
+            if self._last is None:
+                return []
+            q = self._last[3]
+        w = np.array([float(v) for v in gyro], dtype=float) if gyro else np.zeros(3)
+        # A dropped read (None) holds the previous value; before any, the neutral pose.
+        previous = self._last[1] if self._last is not None else None
+        pos = np.array(
+            [
+                float(joints[n]) if joints.get(n) is not None
+                else (previous[i] if previous is not None else NEUTRAL_POSE.get(n, 0.0))
+                for i, n in enumerate(self.names)
+            ]
+        )
+        vel = np.array(
+            [float((joint_velocities or {}).get(n) or 0.0) for n in self.names], dtype=float
+        )
+        t = float(t)
+
+        if self._last is None or t < self._last[0]:
+            self.odometry.reset(dict(zip(self.names, pos)), quat_to_matrix(q))
+            self._last = (t, pos, vel, q, w)
+            self._next_t = t + self.dt
+            return [_make_sample(self.odometry, t, dict(zip(self.names, pos)))]
+
+        t0, pos0, vel0, q0, w0 = self._last
+        # q and -q are the same rotation; keep the sign continuous so the interpolation
+        # below does not sweep through zero (see _resample_quat).
+        if float(q @ q0) < 0.0:
+            q = -q
+
+        samples: list[OdometrySample] = []
+        while self._next_t <= t + 1e-9:
+            alpha = (self._next_t - t0) / (t - t0) if t > t0 else 1.0
+            pos_i = pos0 + alpha * (pos - pos0)
+            vel_i = vel0 + alpha * (vel - vel0)
+            q_i = q0 + alpha * (q - q0)
+            q_i = q_i / (np.linalg.norm(q_i) or 1.0)
+            w_i = w0 + alpha * (w - w0)
+
+            joints_i = dict(zip(self.names, pos_i))
+            self.odometry.update(
+                joints_i, dict(zip(self.names, vel_i)), quat_to_matrix(q_i), gyro_to_trunk(w_i)
+            )
+            samples.append(_make_sample(self.odometry, self._next_t, joints_i))
+            self._next_t += self.dt
+
+        self._last = (t, pos, vel, q, w)
+        return samples
 
 
 def _valid_samples(times: list, values: list) -> tuple[np.ndarray, np.ndarray]:
@@ -408,20 +534,9 @@ def replay_log(
         joints = {name: float(joint_grid[name][i]) for name in names}
         velocities = {name: float(velocity_grid[name][i]) for name in names}
 
-        T = odometry.update(
+        odometry.update(
             joints, velocities, quat_to_matrix(quat_grid[i]), gyro_to_trunk(omega_grid[i])
-        ).copy()
-        samples.append(
-            OdometrySample(
-                t=float(t),
-                T_world_trunk=T,
-                body_velocity=odometry.body_velocity.copy(),
-                world_velocity=odometry.world_velocity,
-                omega_trunk=odometry.omega_trunk,
-                support_frame=odometry.support_frame,
-                support_side=odometry.support_side,
-                joints=joints,
-            )
         )
+        samples.append(_make_sample(odometry, t, joints))
 
     return samples

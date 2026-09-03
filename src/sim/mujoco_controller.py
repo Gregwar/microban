@@ -25,6 +25,26 @@ from constants import MOTOR_TO_ID, ID_TO_MOTOR, NEUTRAL_POSE, KP_DEFAULT, BAM_VI
 # the contact solver ejects it.
 SPAWN_HEIGHT: float = 0.174
 
+# Sole corners, used to drop a seeded pose onto the floor: with the robot held at an
+# arbitrary joint configuration and trunk attitude, the lowest of these is the point that
+# should touch the ground. Same set src/odometry.py anchors its support foot on -- the
+# mid-foot frames would never be lowest on a tilted foot.
+SOLE_CORNER_SITES: tuple[str, ...] = (
+    "left_foot_front_left",
+    "left_foot_front_right",
+    "left_foot_back_left",
+    "left_foot_back_right",
+    "right_foot_front_left",
+    "right_foot_front_right",
+    "right_foot_back_left",
+    "right_foot_back_right",
+)
+
+# Clearance left under the lowest sole corner when seeding a pose. Seating it at exactly
+# 0 makes the contact solver eject the robot on the first step; a few tenths of a mm is
+# below what any measurement here resolves and settles within a tick.
+SEED_CLEARANCE: float = 0.0005
+
 # Window used when velocity is estimated by finite differences instead of read straight
 # from the simulator: v = (q(t) - q(t - dt)) / dt. The XL330 does not measure velocity
 # directly either, so this models the smoothing and lag of the real read.
@@ -40,7 +60,7 @@ NOSLIP_ITERATIONS: int = 1
 # log's metadata (get_log_metadata) — otherwise two logs recorded under different models are
 # indistinguishable once on disk.
 BAM_MOTOR: str = "xl330"
-BAM_MODEL: str = "m6"
+BAM_MODEL: str = "m3"
 
 
 class _DelayBuffer:
@@ -82,7 +102,14 @@ class MuJoCoController:
         # Launch the passive MuJoCo viewer. Set False for a headless run (e.g. batch log
         # replay), where there is no window to step in real time and nothing to sync to.
         enable_viewer: bool = True,
+        # Which bundled bam friction model the actuators run on, and the supply voltage they
+        # run at. Both default to the module constants; a sweep over m1..m6, or a replay of a
+        # run recorded on a half-flat battery, overrides them per instance rather than
+        # editing this file between runs.
+        bam_model: str = BAM_MODEL,
+        bam_vin: float = BAM_VIN,
     ) -> None:
+        self._bam_vin = float(bam_vin)
         self._stop_flag_path = Path(stop_flag_path)
         self._reset_source = reset_source
         self._model = mujoco.MjModel.from_xml_path(mjcf_path)
@@ -122,11 +149,11 @@ class MuJoCoController:
         # Built before the pose is set: its constructor calls mj_setConst(), which resets
         # the data back to qpos0. Set the pose first and it silently lands at the origin,
         # buried in the floor, and the contact solver ejects it on the first step.
-        bam_model = bam_load_model(motor_name=BAM_MOTOR, model=BAM_MODEL)
-        bam_model.actuator.kp = KP_DEFAULT
-        bam_model.actuator.vin = BAM_VIN
+        loaded = bam_load_model(motor_name=BAM_MOTOR, model=bam_model)
+        loaded.actuator.kp = KP_DEFAULT
+        loaded.actuator.vin = self._bam_vin
         self._bam = BamController(
-            bam_model,
+            loaded,
             list(MOTOR_TO_ID.keys()),
             self._model,
             self._data,
@@ -135,7 +162,7 @@ class MuJoCoController:
         )
 
         # Supply voltage actually seen by the motors, kept in step with the bam model.
-        self._vin_eff: float = BAM_VIN
+        self._vin_eff: float = self._bam_vin
 
         # Start from the same state [r] resets to, so a fresh run and a reset are identical.
         self._set_neutral_state()
@@ -329,6 +356,7 @@ class MuJoCoController:
             "source": "simulation",
             "bam_motor": BAM_MOTOR,
             "bam_model": self._bam.model.name,
+            "bam_vin": round(self._bam_vin, 3),
         }
 
     def _sample_effective_vin(self) -> None:
@@ -343,7 +371,7 @@ class MuJoCoController:
         act = self._bam.model.actuator
         duty_cycle = getattr(act, "duty_cycle", None)
         if duty_cycle is None:  # no control step has run yet
-            self._vin_eff = BAM_VIN
+            self._vin_eff = self._bam_vin
             return
         # Battery current: the H-bridge only sources torque / kt during the PWM on-time, and
         # the joints share a supply, so sum the signed per-joint draw before clamping at zero.
@@ -354,7 +382,7 @@ class MuJoCoController:
                 / self._bam.model.kt.value
             )
         )
-        vin = BAM_VIN - BAM_VOLTAGE_DROP_RESISTANCE * max(current, 0.0)
+        vin = self._bam_vin - BAM_VOLTAGE_DROP_RESISTANCE * max(current, 0.0)
         self._vin_eff = max(vin, BAM_VIN_MIN)
 
     def sync_read_present_input_voltage(self, ids: list[int]) -> list[float]:
@@ -410,18 +438,79 @@ class MuJoCoController:
                 self._data.qpos[self._name_to_qpos_idx[name]] = angle
         mujoco.mj_forward(self._model, self._data)
 
+    def reset_to_pose(
+        self,
+        joint_angles: dict[str, float],
+        body_quat: tuple[float, float, float, float] | None = None,
+        clearance: float = SEED_CLEARANCE,
+    ) -> float:
+        """Seed the robot at a given joint pose and trunk attitude, feet on the floor.
+
+        Where :meth:`reset` drops the robot into the neutral pose at a fixed height, this
+        puts it in *this* configuration -- the one a log recorded at the moment a policy
+        went active -- so a simulation can start from the same state the real run did
+        rather than from a standing pose the policy never saw.
+
+        The height is not given: it is solved for. The joints and the free-joint quaternion
+        fix the whole shape of the robot, and forward kinematics then says where its sole
+        corners are; the base is lowered so the lowest of them rests `clearance` above the
+        floor. That is the only height at which the feet are neither floating nor buried,
+        and it is what makes a seeded pose stand still instead of dropping or being ejected
+        on the first step.
+
+        `body_quat` is the trunk attitude as (w, x, y, z) -- the log's ``body_quat`` channel
+        -- so a robot that was leaning starts leaning. Yaw is kept as given; it does not
+        affect the height and a squat has no heading to match.
+
+        Returns the trunk height it settled on [m], for the caller to report.
+        """
+        self._data.qpos[:] = 0.0
+        self._data.qvel[:] = 0.0
+        self._data.ctrl[:] = 0.0
+        self._data.qpos[3:7] = body_quat if body_quat is not None else (1.0, 0.0, 0.0, 0.0)
+        for name, angle in joint_angles.items():
+            if name in self._name_to_qpos_idx:
+                self._data.qpos[self._name_to_qpos_idx[name]] = float(angle)
+
+        # Solve for the height: place the base at 0, see where the soles land, lower by
+        # exactly that much. One pass is exact -- moving the base is a rigid translation, so
+        # every site moves with it.
+        mujoco.mj_forward(self._model, self._data)
+        soles = [
+            mujoco.mj_name2id(self._model, mujoco.mjtObj.mjOBJ_SITE, name)
+            for name in SOLE_CORNER_SITES
+        ]
+        missing = [n for n, i in zip(SOLE_CORNER_SITES, soles) if i < 0]
+        if missing:
+            raise ValueError(f"Model has no sole corner sites {missing}; cannot seat a seeded pose.")
+        lowest = min(float(self._data.site_xpos[i][2]) for i in soles)
+        self._data.qpos[2] = clearance - lowest
+        mujoco.mj_forward(self._model, self._data)
+
+        self._flush_delays()
+        return float(self._data.qpos[2])
+
+    def _flush_delays(self) -> None:
+        """Re-seed every delay buffer and history from the current state.
+
+        Without this the first ticks after a reset replay readings captured before it --
+        for a seeded pose, readings of a robot that was standing somewhere else entirely.
+        """
+        for mid in MOTOR_TO_ID.values():
+            angle = self._data.qpos[self._name_to_qpos_idx[ID_TO_MOTOR[mid]]]
+            self._delay_act[mid].fill(angle)
+            self._delay_pos[mid].fill(angle)
+            self._delay_vel[mid].fill(0.0)
+        self._delay_gyro.fill((0.0, 0.0, 0.0))
+        quat = tuple(float(v) for v in self._data.qpos[3:7])
+        self._delay_quat.fill(quat)
+        self._vin_eff = self._bam_vin
+        self._reset_pos_history()
+        self._viewer_sync()
+
     def reset(self) -> None:
         """Reset the simulation to the initial neutral standing pose."""
         self._set_neutral_state()
         # Flush the delay buffers too, so the first ticks after a reset don't replay
         # readings captured while the robot was falling.
-        for mid in MOTOR_TO_ID.values():
-            neutral = self._data.qpos[self._name_to_qpos_idx[ID_TO_MOTOR[mid]]]
-            self._delay_act[mid].fill(neutral)
-            self._delay_pos[mid].fill(neutral)
-            self._delay_vel[mid].fill(0.0)
-        self._delay_gyro.fill((0.0, 0.0, 0.0))
-        self._delay_quat.fill((1.0, 0.0, 0.0, 0.0))
-        self._vin_eff = BAM_VIN
-        self._reset_pos_history()
-        self._viewer_sync()
+        self._flush_delays()

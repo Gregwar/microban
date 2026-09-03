@@ -47,10 +47,6 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 LOG_DIR = "logs"
 
-# Scene rather than the bare robot: --view wants the floor and lights to judge the replay
-# against. The odometry itself loads the robot alone (odometry.DEFAULT_MODEL_PATH).
-SCENE_PATH = "src/model/mjcf/scene.xml"
-
 # Single log: goal is dashed black over a blue read. Comparing several, each log takes a
 # colour of its own instead, keeping dashed=goal / solid=read.
 SOLO_GOAL_COLOR = "black"
@@ -282,49 +278,29 @@ def odometry_channels(samples: list) -> dict[str, list[float]]:
     }
 
 
-def view_replay(samples: list, scene_path: str = SCENE_PATH) -> None:
+def view_replay(samples: list, scene_path: str | None = None) -> None:
     """Loop the log in the MuJoCo viewer, with the base placed by the odometry.
 
-    Purely kinematic: the joints are written straight from the recorded readback and the
-    free base from the estimated trunk pose, then only forward kinematics is run. Nothing
-    is simulated, so this shows what the estimator believes happened — including the feet
-    sinking into or floating above the floor wherever it believes wrong.
+    The drawing itself is src/debug/odometry_view.py, shared with the live viewer
+    (src/debug/live_viewer.py): joints from the recorded readback, free base from the
+    estimated trunk pose, the anchor as a dot on the floor, and only forward kinematics —
+    nothing is simulated, so this shows what the estimator believes happened.
 
     Runs on the odometry's own interpolated grid, so the playback is smoother than the
     50 Hz the log was recorded at. Time still comes from the log's clock, and the replay
     restarts from the top until the viewer window is closed.
     """
-    import mujoco
-    import mujoco.viewer
-
-    from constants import MOTOR_TO_ID
-    from odometry import matrix_to_quat
-
-    model = mujoco.MjModel.from_xml_path(scene_path)
-    data = mujoco.MjData(model)
-
-    qpos_adr = {}
-    for name in MOTOR_TO_ID:
-        joint_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_JOINT, name)
-        if joint_id >= 0:
-            qpos_adr[name] = model.jnt_qposadr[joint_id]
+    from odometry_view import SCENE_PATH, OdometryView
 
     print(f"Replaying {len(samples)} ticks in the viewer — close the window to stop.")
-    with mujoco.viewer.launch_passive(model, data) as viewer:
-        while viewer.is_running():
+    with OdometryView(scene_path or SCENE_PATH) as view:
+        while view.is_running():
             wall_start = time.perf_counter()
             for i, sample in enumerate(samples):
-                if not viewer.is_running():
+                if not view.is_running():
                     break
 
-                T = sample.T_world_trunk
-                data.qpos[0:3] = T[:3, 3]
-                data.qpos[3:7] = matrix_to_quat(T[:3, :3])
-                for name, adr in qpos_adr.items():
-                    data.qpos[adr] = sample.joints.get(name, 0.0)
-
-                mujoco.mj_forward(model, data)
-                viewer.sync()
+                view.show(sample)
 
                 # Hold this frame until the next one is due. The deadline is absolute —
                 # measured from wall_start, not from the previous frame — and `now` is

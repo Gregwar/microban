@@ -5,7 +5,7 @@
 
 Usage:
     uv run src/sim/viewer_main.py --hz 25
-    make viewer
+    make kinematic-viewer
 """
 
 import argparse

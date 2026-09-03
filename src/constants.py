@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 # Copyright 2026 Marc Duclusaud
 
+import os
+
 import numpy as np
 
 MOTOR_TO_ID = {
@@ -71,14 +73,32 @@ MOTOR_SIGN = {
     "head": 1.0,
 }
 
+# --- Simulation model (MJCF) -------------------------------------------------
+# Joint backlash. With USE_BACKLASH the MuJoCo simulation loads the model variant that
+# carries one extra free hinge next to every actuated joint (+-0.5 deg of play by default;
+# retune it once at the top of robot_with_backlash.xml), reproducing the XL330 gear play
+# that makes the real robot lag its commands around each zero crossing.
+# MICROBAN_BACKLASH=1/0 overrides it, for A/B-ing a run without editing this file.
+# Only the physics model switches: placo (IK, odometry) keeps the plain robot.xml, whose
+# joint set is the commandable one — the backlash DoF are not actuated and not measured.
+USE_BACKLASH: bool = False
+
+MJCF_DIR: str = "src/model/mjcf"
+# Full simulation scene (robot + floor + lights), what the MuJoCo runners load.
+SIM_SCENE_MJCF: str = f"{MJCF_DIR}/{'scene_with_backlash.xml' if USE_BACKLASH else 'scene.xml'}"
+# Bare robot, for tools that load the robot alone in MuJoCo.
+SIM_ROBOT_MJCF: str = f"{MJCF_DIR}/{'robot_with_backlash.xml' if USE_BACKLASH else 'robot.xml'}"
+# Kinematic model for placo: always backlash-free (see above).
+KINEMATIC_ROBOT_MJCF: str = f"{MJCF_DIR}/robot.xml"
+
 # Position P Gain (Dynamixel register value)
 KP_DEFAULT: int = 600        # ~0.886 Nm/rad in MuJoCo
 KP_RL: int = 125             # ~0.277 Nm/rad in MuJoCo
 KP_GAIN_PRM: float = 0.0022  # Nm/rad per register unit (for Xl330)
 
 # BAM motor model (bam package, XL330 m6)
-BAM_VIN: float = 7.7
-BAM_VIN_MIN: float = 6.0
+BAM_VIN: float = 7.8
+BAM_VIN_MIN: float = 5.0
 BAM_VOLTAGE_DROP_RESISTANCE: float = 0.5
 BAM_MAX_CURRENT: float = 1.75 # XL330 firmware current limit [A]: clips motor torque to ±BAM_MAX_CURRENT * kt
 STANDBY_CURRENT: float = 0.010 # Doc says 17mA but motor reports more like 10mA

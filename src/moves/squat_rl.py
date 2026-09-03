@@ -12,7 +12,7 @@ from observer import Observation
 from moves.move import MotorCommand, Move, MoveState, onnx_run_name
 
 # Policy name
-AGENT_NAME = "squat_m6_45.onnx"
+AGENT_NAME = "squat_m1_45.onnx"
 
 # Squat clock. This policy does not track a trunk height: it tracks a placo-generated
 # squat reference — the same motion src/moves/squat.py runs — and the only thing it is

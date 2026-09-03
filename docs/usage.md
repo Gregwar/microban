@@ -28,7 +28,8 @@ by default; add `HOST=microban-ext` to operate over the secondary network (see t
 | `make voltage` | Read the voltage of all motors. |
 | `make voltage ID=<id>` | Read the voltage of motor `<id>`. |
 | `make sim` | Run the MuJoCo simulation locally (no robot needed). |
-| `make viewer` | Open the MuJoCo viewer locally (no robot needed). |
+| `make viewer [hostname]` | Watch a running control loop (robot or `make sim`) live in the MuJoCo viewer, posed by the odometry. Defaults to `localhost`. |
+| `make kinematic-viewer` | Run the scheduler against a physics-free placo model in a MeshCat browser view (no robot needed). |
 | `make get-logs` | Copy the JSON logs recorded with `l` from the robot into `./logs/`. |
 
 ## Running the robot
@@ -143,6 +144,34 @@ motor after such a failure to name the silent one — off by default, because it
 nineteen extra round trips inside a tick that has already overrun, so use it on the bench
 rather than under a walking policy.
 
+## Watching the robot live
+
+While the control loop runs — on the robot or in `make sim` — it broadcasts its state once
+per tick over ZeroMQ (PUB/SUB, JSON, port 5555; see
+[state_publisher.py](../src/state_publisher.py)). The broadcast never waits for anyone:
+subscribers come and go, and one that cannot keep up loses ticks rather than slowing the
+loop. On the robot it needs `pyzmq` in the venv, so run `make setup` once after pulling it.
+
+`make viewer [hostname]` subscribes to it and shows the robot in the MuJoCo viewer:
+
+```
+make viewer            # a `make sim` running on this machine
+make viewer microban   # the robot
+```
+
+The joints are the servo readback and the floating base comes from the same kinematic
+odometry the log tools use (see [Odometry](#odometry) below), run live as the ticks arrive
+and on the same 5 ms grid as the offline replay. The anchor — the sole corner the
+estimator currently holds still — is drawn as a dot on the floor, blue under the left foot
+and red under the right; it jumps to a new corner at every transfer, which is where the
+odometry advances. `R` in the viewer window re-plants the robot at the origin, and the
+terminal prints the estimated pose, the anchor and the active moves once a second. The
+estimate is dead reckoning and drifts; nothing here is deployed to the robot.
+
+Each message is one JSON object whose channels are named like the log's (`position`,
+`velocity`, `target_position`, `gyro`, `body_quat`, `command`...) plus `t`, `source` and
+`active_moves`, so a few lines of `pyzmq` are enough to feed anything else with it.
+
 ## Logging a session
 
 Press `l` to start recording, and `l` again to stop. On start you are prompted for an
@@ -166,7 +195,7 @@ is not stamped, since its real start time falls outside the log.
 
 The metadata block also says where the samples came from, so a real run and a simulated one
 are told apart once on disk: `source` is `robot` (`make run`), `simulation` (`make sim`, and
-the replays produced by `src/debug/sim_log.py --log`) or `kinematic viewer` (`make viewer`,
+the replays produced by `src/debug/sim_log.py --log`) or `kinematic viewer` (`make kinematic-viewer`,
 no physics). A simulated log additionally carries the actuator model it ran on —
 `bam_motor` (`xl330`) and `bam_model` (`m1`…`m6`, set by `BAM_MODEL` in
 [mujoco_controller.py](../src/sim/mujoco_controller.py)) — since changing the friction model
@@ -262,7 +291,7 @@ time, converging. 20 ms is the outlier; 5 ms lands within ~0.1 m of the limit fo
 essentially no extra cost (the placo model load dominates the runtime either way).
 
 `--view` replays that estimate in the MuJoCo viewer instead of plotting, looping until you
-close the window, paced by the log's own timestamps:
+close the window, paced by the log's own timestamps (the same view `make viewer` shows live):
 
 ```
 uv run --group debug --group sim src/debug/plot_log.py logs/a.json --view
@@ -365,6 +394,28 @@ the error at the top of each 20 ms tick, which is the largest error of the tick,
 cycle is an upper bound. Running it on a *sim* log measures exactly that: the same bam model
 is on both sides, and what is left (~2.5x on the bus current of a squat) is the cost of
 evaluating it once per tick rather than every physics step.
+
+### Simulating joint backlash
+
+`src/model/mjcf/robot_with_backlash.xml` is `robot.xml` with one extra unactuated hinge
+next to every actuated joint, on the same axis: the gear play of the XL330 output stage.
+The motor joint is the one commanded and read back; the link behind it is free to lag by
+up to the play, so a direction reversal moves the command before it moves the leg. The
+half-range is `+-0.5 deg` and lives in a single `<default class="backlash">` block at the
+top of that file — change its `range` (in radians, the file compiles with
+`angle="radian"`) and every joint follows.
+
+`USE_BACKLASH` in `src/constants.py` picks which model the MuJoCo runners load
+(`src/sim/sim_main.py`, `src/debug/sim_log.py`, `src/debug/sim_squats.py`), or set
+`MICROBAN_BACKLASH=1` to A/B a run without editing the file:
+
+```
+MICROBAN_BACKLASH=1 make sim
+```
+
+Only the physics model switches. placo — the IK and the odometry — keeps the plain
+`robot.xml`: the backlash joints are neither actuated nor measured, so they have no place
+in the model the control side reasons about.
 
 ## Controlling with a gamepad
 

@@ -36,12 +36,12 @@ import json
 import argparse
 from pathlib import Path
 
-from constants import MOTOR_TO_ID, NEUTRAL_POSE, KP_DEFAULT, KP_RL
+from constants import MOTOR_TO_ID, NEUTRAL_POSE, KP_DEFAULT, KP_RL, SIM_SCENE_MJCF
 from observer import Observer
 from robot_logger import RobotLogger
 from sim.mujoco_controller import MuJoCoController
 
-MJCF_PATH = "src/model/mjcf/scene.xml"
+MJCF_PATH = SIM_SCENE_MJCF
 
 
 def _tick_dt(times: list[float]) -> float:

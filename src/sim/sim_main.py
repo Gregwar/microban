@@ -10,6 +10,7 @@ Usage:
 
 import argparse
 
+from constants import SIM_SCENE_MJCF
 from scheduler import Scheduler
 from input.actions import build_input_source
 from sim.debug_keys import SimDebugKeys
@@ -41,7 +42,7 @@ def main() -> None:
     debug_keys = SimDebugKeys()
 
     controller = MuJoCoController(
-        mjcf_path="src/model/mjcf/scene.xml",
+        mjcf_path=SIM_SCENE_MJCF,
         key_callback=debug_keys.key_callback,
         reset_source=debug_keys,
         delay_act_steps=args.delay_act,

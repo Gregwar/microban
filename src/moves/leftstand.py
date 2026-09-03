@@ -12,7 +12,7 @@ from observer import Observation
 from moves.move import MotorCommand, Move, MoveState, onnx_run_name
 
 # Policy name
-AGENT_NAME = "leftstand_m6.onnx"
+AGENT_NAME = "leftstand_25.onnx"
 
 # Single-leg clock. Like the squat reference policy, this one is not given a pose target
 # but a position in a cycle:

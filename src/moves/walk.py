@@ -27,14 +27,14 @@ MIRROR = False
 # ONNX metadata). [cos, sin] of the phase is appended to the observation; the phase
 # advances while a velocity is commanded and rewinds to 0 when standing, matching
 # the ReferenceCommand behaviour in training.
-PHASE_FREQUENCY = 1.5
+PHASE_FREQUENCY = 50 / 34.
 
 # Frequency (Hz) of the control loop stepping this move (see Scheduler); used to
 # convert PHASE_FREQUENCY into a per-tick phase increment.
 CONTROL_FREQUENCY = 50.0
 
 # Policy name
-AGENT_NAME = "walk_phase.onnx"
+AGENT_NAME = "walk.onnx"
 
 
 class WalkMove(Move):
